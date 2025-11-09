@@ -4,7 +4,8 @@
 *.dll
 *.so
 *.dylib
-zap
+/zap
+/zap.exe
 zap.exe
 
 # Test binary, built with `go test -c`
