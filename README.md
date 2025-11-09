@@ -2,50 +2,122 @@
 
 Developer environment cleanup and port process management tool.
 
-zap keeps your development machine clean and responsive by terminating orphaned dev servers, freeing ports, and removing stale dependency directories and build artifacts. It is designed to be safe, predictable, and automated, with optional interactive control and persistent user preferences.
+## The Problem
 
-## Overview
+During development, common frustrations include:
 
-During development, it is common to:
+- **Port conflicts**: Starting a dev server only to see "port already in use" because an old process is still running
+- **Orphaned processes**: Closing a terminal window doesn't always kill the underlying process, leaving servers running in the background
+- **Disk bloat**: Accumulating gigabytes of `node_modules`, `.venv`, `.cache`, and build artifacts across dozens of projects
+- **Manual cleanup**: Manually hunting down processes and directories wastes time
 
-- Start a dev server twice and receive a "port already in use" error
-- Close a terminal window but leave the underlying process running
-- Accumulate large node_modules, .venv, .cache, .gradle, or build directories across many projects
-- Lose gigabytes of disk space without realizing it
+These interruptions slow down workflows and clutter your system.
 
-These interruptions slow down workflows and clutter the system.
+## The Solution
 
-zap solves this by automatically detecting and terminating development-related processes holding ports, and by identifying and cleaning unused dependency/project directories.
+zap automatically detects and terminates orphaned development processes, and identifies stale dependency directories for cleanup. It's safe, predictable, and respects your preferences.
+
+## Installation
+
+### Prerequisites
+
+- Go 1.21 or later
+- macOS, Linux, or Windows with WSL
+
+### Install from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/hugoev/zap.git
+cd zap
+
+# Install the binary
+go install ./cmd/zap
+
+# Add Go bin to your PATH (if not already there)
+echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zshrc  # or ~/.bashrc for bash
+source ~/.zshrc  # or open a new terminal
+
+# Verify installation
+zap version
+```
+
+The binary will be installed to `~/go/bin/zap` (or `$GOPATH/bin/zap` if GOPATH is set).
+
+## Quick Start
+
+### Free up ports
+
+```bash
+# Scan and see what's running
+zap ports
+
+# Auto-terminate safe dev servers without prompts
+zap ports --yes
+
+# See what would be terminated (dry run)
+zap ports --dry-run
+```
+
+### Clean up stale directories
+
+```bash
+# Find stale dependency directories
+zap cleanup --dry-run
+
+# Remove them (with confirmation)
+zap cleanup
+
+# Auto-remove without prompts
+zap cleanup --yes
+```
 
 ## Features
 
-### Port Process Cleanup
+### Port Process Management
 
-`zap ports`
-
-- Scans for processes listening on commonly used development ports (e.g., 3000, 5173, 8000, 8080)
-- Detects and handles related "+1" zombie hot-reload processes
-- Automatically terminates known safe development servers (Node, Vite, Go run, Python reload, etc.)
-- Prompts before terminating database, queue, and infrastructure processes (e.g., Postgres, Redis, Docker)
-- Respects "protected" port list
-- Allows persistent user preferences to avoid repeated prompts
+- Scans common development ports (3000, 5173, 8000, 8080, etc.)
+- Automatically identifies safe dev servers (Node, Vite, Python, Go, etc.)
+- Prompts before terminating infrastructure (Postgres, Redis, Docker)
+- Respects protected ports list
+- Shows process runtime and details
 
 ### Workspace Cleanup
 
-`zap cleanup`
+- Finds stale dependency directories:
+  - `node_modules`, `.venv`, `.cache`, `.gradle`, `.mypy_cache`
+  - `__pycache__`, `.pytest_cache`, `target`, `dist`, `build`
+  - `.next`, `.turbo`, `.nuxt`, `.output`
+- Sorts by size (largest first)
+- Respects exclusions and recent modifications
+- Shows total space that can be reclaimed
 
-- Searches for large dependency and cache directories such as:
-  - node_modules, .venv, .cache, .gradle, .mypy_cache
-  - **pycache**, .pytest_cache, target, dist, build
-  - .next, .turbo, .nuxt, .output
-- Presents size summaries before removing anything
-- Allows exclusion of specific directories
-- Automatically remembers user exclusions
-- Reclaims wasted disk space efficiently
+### Safety First
 
-## Logging Output
+- **Development servers**: Prompted for confirmation (or auto-terminate with `--yes`)
+- **Infrastructure processes**: Always prompts (databases, Docker, etc.)
+- **Protected ports**: Never terminated (configurable)
+- **Recent directories**: Skipped automatically
 
-zap uses structured, professional logging:
+## Usage
+
+### Commands
+
+| Command       | Description                               |
+| ------------- | ----------------------------------------- |
+| `zap ports`   | Scan and terminate orphaned dev processes |
+| `zap cleanup` | Remove stale dependency/cache folders     |
+| `zap version` | Display version information               |
+
+### Flags
+
+| Flag              | Description                                 |
+| ----------------- | ------------------------------------------- |
+| `--yes`, `-y`     | Execute without confirmation where safe     |
+| `--dry-run`       | Show planned actions without making changes |
+| `--verbose`, `-v` | Show detailed progress and information      |
+
+### Example Output
 
 ```
 SCAN     checking commonly used development ports
@@ -58,82 +130,42 @@ STOP     PID 55222
 STATS    terminated 2 process(es), 1 skipped
 ```
 
-### Log Format:
-
-| Code   | Meaning                               |
-| ------ | ------------------------------------- |
-| SCAN   | Discovery / search operation          |
-| FOUND  | Candidate resource located            |
-| SKIP   | Resource intentionally left untouched |
-| ACTION | Confirmation prompt when required     |
-| STOP   | Process termination event             |
-| DELETE | Directory removal event               |
-| OK     | Successful completion                 |
-| FAIL   | Operation error                       |
-| INFO   | Detailed information (verbose mode)   |
-| STATS  | Summary statistics                    |
-
-Colors are used to improve clarity (ANSI-compatible) but never required.
-
 ## Configuration
 
-Configuration persists automatically as the user interacts with the tool.
-
-Config file location:
-
-```
-~/.config/zap/config.json
-```
-
-Example:
+Configuration is stored at `~/.config/zap/config.json` and persists automatically.
 
 ```json
 {
   "protected_ports": [5432, 6379],
   "max_age_days_for_cleanup": 14,
   "exclude_paths": ["~/work/critical/node_modules"],
-  "auto_confirm_safe_actions": true
+  "auto_confirm_safe_actions": false
 }
 ```
 
-Users do not need to manually edit this file; settings update automatically based on interaction.
+Settings update automatically based on your interactions—no manual editing required.
 
-## Safety Rules
+## Log Levels
 
-| Case                                                   | Behavior                 |
-| ------------------------------------------------------ | ------------------------ |
-| Development server detected on common port             | Automatically terminated |
-| Database, cache server, or docker engine detected      | Prompt for confirmation  |
-| Directory appears stale and matches known patterns     | Suggested for cleanup    |
-| Directory recently modified or user-marked as excluded | Skipped silently         |
+| Code   | Meaning                               |
+| ------ | ------------------------------------- |
+| SCAN   | Discovery/search operation            |
+| FOUND  | Candidate resource located            |
+| SKIP   | Resource intentionally left untouched |
+| ACTION | Confirmation prompt                   |
+| STOP   | Process terminated                    |
+| DELETE | Directory removed                     |
+| OK     | Successful completion                 |
+| FAIL   | Operation error                       |
+| INFO   | Detailed information (verbose mode)   |
+| STATS  | Summary statistics                    |
 
-zap always explains its actions before executing irreversible operations unless the user has explicitly enabled non-interactive mode.
+Colors are used for clarity (ANSI-compatible) but never required.
 
-## Command Summary
+## License
 
-| Command       | Description                                                   |
-| ------------- | ------------------------------------------------------------- |
-| `zap ports`   | Scan and terminate orphaned or conflict-causing dev processes |
-| `zap cleanup` | Remove stale dependency/cache folders and reclaim disk space  |
-| `git` | Display version and build metadata                            |
+[Add your license here]
 
-Optional flags:
+## Contributing
 
-- `--yes, -y` execute without confirmation where safe
-- `--dry-run` show planned actions without making changes
-- `--verbose, -v` show detailed progress and information
-
-## Goals
-
-- Safe defaults for new users
-- Non-interactive mode for power users and CI systems
-- Clear, minimal, professional command output
-- Zero configuration required to get started
-- Configuration that adapts to user behavior, not vice-versa
-
-## Non-Goals
-
-- No system-wide destructive cleanup
-- No aggressive memory/process sweeping
-- No GUI or daemon mode (CLI-first design)
-- No assumption of specific frontend or backend tooling
+[Add contribution guidelines if applicable]
