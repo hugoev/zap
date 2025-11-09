@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -475,7 +476,7 @@ func handlePorts(ctx context.Context, cfg *config.Config, yes, dryRun, jsonOutpu
 						if !ports.IsProcessRunning(proc.PID) {
 							log.Log(log.STOP, "PID %d", proc.PID)
 							actualKilledCount++
-							
+
 							// Verify port is actually free (detect immediate reuse)
 							time.Sleep(100 * time.Millisecond) // Brief delay for port release
 							if ports.IsPortInUse(proc.Port) {
@@ -527,7 +528,7 @@ func handlePorts(ctx context.Context, cfg *config.Config, yes, dryRun, jsonOutpu
 						if !ports.IsProcessRunning(proc.PID) {
 							log.Log(log.STOP, "PID %d", proc.PID)
 							actualKilledCount++
-							
+
 							// Verify port is actually free (detect immediate reuse)
 							time.Sleep(100 * time.Millisecond) // Brief delay for port release
 							if ports.IsPortInUse(proc.Port) {
@@ -925,6 +926,41 @@ func shellEscape(s string) string {
 	return "'" + escaped + "'"
 }
 
+// copyFile copies a file from src to dst, preserving permissions
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer sourceFile.Close()
+
+	// Get source file info for permissions
+	sourceInfo, err := sourceFile.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat source file: %w", err)
+	}
+
+	// Create destination file with same permissions
+	destFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, sourceInfo.Mode())
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer destFile.Close()
+
+	// Copy contents
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return fmt.Errorf("failed to copy file contents: %w", err)
+	}
+
+	// Sync to ensure data is written
+	if err := destFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync destination file: %w", err)
+	}
+
+	return nil
+}
+
 func showPathInstructions(goBinPath, shellName string) {
 	fmt.Println()
 	log.Log(log.INFO, "to add %s to your PATH manually:", goBinPath)
@@ -1252,7 +1288,10 @@ func handleUpdate() {
 			versionStr, commitHash, dateStr)
 
 		log.VerboseLog("building with version: %s, commit: %s", versionStr, commitHash)
-		buildCmd := exec.CommandContext(buildCtx, "go", "build", "-ldflags", ldflags, "-o", expectedZapPath, "./cmd/zap")
+		
+		// Build to temporary location first (safety: don't replace existing binary until verified)
+		tempBinaryPath := expectedZapPath + ".new"
+		buildCmd := exec.CommandContext(buildCtx, "go", "build", "-ldflags", ldflags, "-o", tempBinaryPath, "./cmd/zap")
 		buildCmd.Dir = tempDir
 		buildCmd.Stdout = os.Stdout
 		buildCmd.Stderr = os.Stderr
@@ -1260,6 +1299,8 @@ func handleUpdate() {
 		buildCancel()
 
 		if buildErr != nil {
+			// Clean up temp binary on build failure
+			os.Remove(tempBinaryPath)
 			log.Log(log.FAIL, "failed to build update: %v", buildErr)
 			log.Log(log.INFO, "falling back to go install (version may show as 'dev')")
 			// Fallback to regular go install
@@ -1274,8 +1315,89 @@ func handleUpdate() {
 			}
 		} else {
 			// Make the binary executable
-			os.Chmod(expectedZapPath, 0755)
-			log.VerboseLog("built binary with version %s at %s", versionStr, expectedZapPath)
+			os.Chmod(tempBinaryPath, 0755)
+			log.VerboseLog("built binary with version %s at %s", versionStr, tempBinaryPath)
+			
+			// Verify the new binary works before replacing the old one
+			log.VerboseLog("verifying new binary...")
+			verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			verifyCmd := exec.CommandContext(verifyCtx, tempBinaryPath, "version")
+			verifyOutput, verifyErr := verifyCmd.Output()
+			verifyCancel()
+			
+			if verifyErr != nil {
+				// New binary is corrupted or doesn't work - don't replace
+				os.Remove(tempBinaryPath)
+				log.Log(log.FAIL, "new binary verification failed: %v", verifyErr)
+				log.Log(log.INFO, "update aborted - existing binary unchanged")
+				log.Log(log.INFO, "output: %s", string(verifyOutput))
+				os.Exit(1)
+			}
+			
+			// Binary works - create backup of existing binary if it exists
+			var backupPath string
+			if _, err := os.Stat(expectedZapPath); err == nil {
+				backupPath = expectedZapPath + ".backup"
+				log.VerboseLog("creating backup of existing binary: %s", backupPath)
+				if err := copyFile(expectedZapPath, backupPath); err != nil {
+					os.Remove(tempBinaryPath)
+					log.Log(log.FAIL, "failed to create backup: %v", err)
+					log.Log(log.INFO, "update aborted - cannot backup existing binary")
+					os.Exit(1)
+				}
+			}
+			
+			// Replace old binary with new one (atomic on most filesystems)
+			log.VerboseLog("replacing binary: %s -> %s", tempBinaryPath, expectedZapPath)
+			if err := os.Rename(tempBinaryPath, expectedZapPath); err != nil {
+				// Replacement failed - restore backup if we created one
+				os.Remove(tempBinaryPath)
+				if backupPath != "" {
+					log.Log(log.FAIL, "failed to replace binary: %v", err)
+					log.Log(log.INFO, "restoring from backup...")
+					if restoreErr := copyFile(backupPath, expectedZapPath); restoreErr != nil {
+						log.Log(log.FAIL, "failed to restore backup: %v", restoreErr)
+						log.Log(log.INFO, "original binary may be corrupted - manual recovery required")
+					} else {
+						log.Log(log.INFO, "backup restored successfully")
+					}
+				} else {
+					log.Log(log.FAIL, "failed to replace binary: %v", err)
+				}
+				os.Exit(1)
+			}
+			
+			// Verify the replaced binary still works
+			log.VerboseLog("verifying replaced binary...")
+			finalVerifyCtx, finalVerifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			finalVerifyCmd := exec.CommandContext(finalVerifyCtx, expectedZapPath, "version")
+			finalVerifyOutput, finalVerifyErr := finalVerifyCmd.Output()
+			finalVerifyCancel()
+			
+			if finalVerifyErr != nil {
+				// Replacement corrupted the binary - restore from backup
+				log.Log(log.FAIL, "replaced binary verification failed: %v", finalVerifyErr)
+				if backupPath != "" {
+					log.Log(log.INFO, "restoring from backup...")
+					if restoreErr := copyFile(backupPath, expectedZapPath); restoreErr != nil {
+						log.Log(log.FAIL, "failed to restore backup: %v", restoreErr)
+						log.Log(log.INFO, "original binary may be corrupted - manual recovery required")
+					} else {
+						log.Log(log.INFO, "backup restored successfully")
+					}
+				} else {
+					log.Log(log.FAIL, "no backup available - binary may be corrupted")
+				}
+				os.Exit(1)
+			}
+			
+			// Success - clean up backup (optional, keep for safety)
+			log.VerboseLog("update successful - new binary verified")
+			log.VerboseLog("new version output: %s", strings.TrimSpace(string(finalVerifyOutput)))
+			// Keep backup for now (user can clean it up later if needed)
+			if backupPath != "" {
+				log.VerboseLog("backup kept at: %s (safe to delete)", backupPath)
+			}
 		}
 	} else {
 		// No tag available, fallback to go install
@@ -1292,8 +1414,10 @@ func handleUpdate() {
 	}
 
 	// Verify the update by checking the new binary's version
-	// Give filesystem a moment to sync
-	time.Sleep(200 * time.Millisecond)
+	// Give filesystem a moment to sync (only needed for go install fallback)
+	if latestTag == "" || latestTag == "main" {
+		time.Sleep(200 * time.Millisecond)
+	}
 
 	// Check if PATH needs to be configured
 	if !strings.Contains(os.Getenv("PATH"), goBinPath) {
