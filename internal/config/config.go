@@ -41,7 +41,7 @@ func getConfigPath() (string, error) {
 		}
 		return filepath.Join(configDir, "config.json"), nil
 	}
-	
+
 	configDir := filepath.Join(homeDir, ".config", "zap")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		// Try alternative location if .config can't be created

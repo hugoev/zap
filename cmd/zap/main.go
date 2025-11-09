@@ -988,12 +988,30 @@ func findProjectDirectories(homeDir string) []string {
 func handleUpdate() {
 	log.Log(log.SCAN, "checking for updates...")
 
-	// Check if go is available
-	goPath, err := exec.LookPath("go")
-	if err != nil {
-		log.Log(log.FAIL, "go command not found. Please install Go to use the update command.")
-		os.Exit(1)
+	// Check all required dependencies upfront with helpful messages
+	dependencies := map[string]struct {
+		installMsg string
+		url        string
+	}{
+		"go": {
+			installMsg: "Go is required for updates",
+			url:        "https://golang.org/dl/",
+		},
+		"git": {
+			installMsg: "Git is required to fetch version tags",
+			url:        "https://git-scm.com/downloads",
+		},
 	}
+
+	for cmd, info := range dependencies {
+		if _, err := exec.LookPath(cmd); err != nil {
+			log.Log(log.FAIL, "%s not found in PATH", cmd)
+			log.Log(log.INFO, "%s. Install from: %s", info.installMsg, info.url)
+			os.Exit(1)
+		}
+	}
+
+	goPath, _ := exec.LookPath("go")
 	log.VerboseLog("using go at: %s", goPath)
 
 	// Get current version
@@ -1057,7 +1075,7 @@ func handleUpdate() {
 
 	maxRetries := 5
 	baseDelay := 1 * time.Second
-	
+
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 
