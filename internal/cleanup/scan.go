@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -61,6 +62,58 @@ var cleanupPatterns = []string{
 	".stylelintcache",
 }
 
+// shouldSkipSystemDirectory checks if a directory should be skipped based on system paths
+// This prevents scanning macOS system directories like Library, Applications, etc.
+func shouldSkipSystemDirectory(path, rootPath string) bool {
+	// Only apply system directory exclusions on macOS
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+
+	// Get relative path from root
+	relPath, err := filepath.Rel(rootPath, path)
+	if err != nil {
+		return false
+	}
+
+	// macOS system directories to skip
+	skipDirs := []string{
+		"Library",      // System libraries, caches, preferences
+		"Applications", // Installed applications
+		".Trash",       // Trash folder
+		"Pictures",     // Usually not projects
+		"Movies",       // Usually not projects
+		"Music",        // Usually not projects
+		"Public",       // Public folder
+		".localized",   // macOS localization files
+		"System",       // System folder (if somehow accessible)
+		"opt",          // Optional software (if in home)
+		"bin",          // User binaries (if in home)
+		"sbin",         // System binaries (if in home)
+	}
+
+	// Split path into components
+	parts := strings.Split(relPath, string(filepath.Separator))
+	
+	// Check each component (skip first empty part if path starts with separator)
+	startIdx := 0
+	if len(parts) > 0 && parts[0] == "" {
+		startIdx = 1
+	}
+
+	for i := startIdx; i < len(parts); i++ {
+		part := parts[i]
+		// Skip if this component matches any skip directory
+		for _, skip := range skipDirs {
+			if part == skip {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func ScanDirectories(rootPath string, shouldCleanup func(path string, modTime time.Time) bool, progressCallback func(string)) ([]DirectoryInfo, error) {
 	var directories []DirectoryInfo
 	var scanErrors []error
@@ -99,6 +152,11 @@ func ScanDirectories(rootPath string, shouldCleanup func(path string, modTime ti
 		// Skip symlinks to avoid following them into unexpected places
 		if info.Mode()&os.ModeSymlink != 0 {
 			return nil
+		}
+
+		// Skip macOS system directories
+		if shouldSkipSystemDirectory(path, rootPath) {
+			return filepath.SkipDir
 		}
 
 		// Report progress

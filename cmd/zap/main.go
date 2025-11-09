@@ -526,26 +526,47 @@ func handleCleanup(cfg *config.Config, yes, dryRun, jsonOutput bool, flagValues 
 	var allDirs []cleanup.DirectoryInfo
 	scannedCount := 0
 
+	// Scan directories in parallel for better performance
+	type scanResult struct {
+		dirs []cleanup.DirectoryInfo
+		err  error
+		path string
+	}
+
+	results := make(chan scanResult, len(scanPaths))
+
+	// Launch parallel scans
 	for _, scanPath := range scanPaths {
 		if _, err := os.Stat(scanPath); os.IsNotExist(err) {
 			log.VerboseLog("skipping non-existent path: %s", scanPath)
+			results <- scanResult{dirs: nil, err: nil, path: scanPath}
 			continue
 		}
 
-		log.VerboseLog("scanning: %s", scanPath)
-		progressCallback := func(path string) {
-			if log.Verbose {
-				log.VerboseLog("  checking: %s", path)
+		go func(path string) {
+			log.VerboseLog("scanning: %s", path)
+			progressCallback := func(checkedPath string) {
+				if log.Verbose {
+					log.VerboseLog("  checking: %s", checkedPath)
+				}
 			}
-		}
 
-		dirs, err := cleanup.ScanDirectories(scanPath, cfg.ShouldCleanup, progressCallback)
-		if err != nil {
-			log.VerboseLog("error scanning %s: %v", scanPath, err)
+			dirs, err := cleanup.ScanDirectories(path, cfg.ShouldCleanup, progressCallback)
+			results <- scanResult{dirs: dirs, err: err, path: path}
+		}(scanPath)
+	}
+
+	// Collect results
+	for i := 0; i < len(scanPaths); i++ {
+		result := <-results
+		if result.err != nil {
+			log.VerboseLog("error scanning %s: %v", result.path, result.err)
 			continue
 		}
-		allDirs = append(allDirs, dirs...)
-		scannedCount++
+		if result.dirs != nil {
+			allDirs = append(allDirs, result.dirs...)
+			scannedCount++
+		}
 	}
 
 	log.VerboseLog("scanned %d directory path(s)", scannedCount)
