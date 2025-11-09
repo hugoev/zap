@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,7 +17,7 @@ import (
 	"github.com/hugoev/zap/internal/ports"
 )
 
-const version = "0.2.1"
+const version = "0.3.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -99,6 +100,12 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 	log.Log(log.SCAN, "checking commonly used development ports")
 	log.VerboseLog("scanning ports: %v", getCommonPorts())
 
+	// Check if required tools are available
+	if _, err := exec.LookPath("lsof"); err != nil {
+		log.Log(log.FAIL, "lsof command not found. Please install lsof (usually pre-installed on macOS/Linux)")
+		os.Exit(1)
+	}
+
 	processes, err := ports.ScanPorts()
 	if err != nil {
 		log.Log(log.FAIL, "Failed to scan ports: %v", err)
@@ -112,11 +119,27 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 
 	log.VerboseLog("found %d processes on scanned ports", len(processes))
 
+	// Remove duplicate processes (same PID can appear on multiple ports)
+	seenPIDs := make(map[int]bool)
+	var uniqueProcesses []ports.ProcessInfo
+	for _, proc := range processes {
+		if !seenPIDs[proc.PID] {
+			seenPIDs[proc.PID] = true
+			uniqueProcesses = append(uniqueProcesses, proc)
+		} else {
+			log.VerboseLog("skipping duplicate PID %d", proc.PID)
+		}
+	}
+
+	if len(uniqueProcesses) != len(processes) {
+		log.VerboseLog("removed %d duplicate process entries", len(processes)-len(uniqueProcesses))
+	}
+
 	var safeToKill []ports.ProcessInfo
 	var needsConfirmation []ports.ProcessInfo
 	var skipped []ports.ProcessInfo
 
-	for _, proc := range processes {
+	for _, proc := range uniqueProcesses {
 		if cfg.IsPortProtected(proc.Port) {
 			log.Log(log.SKIP, ":%d PID %d (%s) protected", proc.Port, proc.PID, proc.Name)
 			skipped = append(skipped, proc)
@@ -170,11 +193,23 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 				actualKilledCount += len(safeToKill)
 			} else {
 				for _, proc := range safeToKill {
+					// Verify process is still running before attempting kill
+					if !ports.IsProcessRunning(proc.PID) {
+						log.VerboseLog("PID %d no longer running, skipping", proc.PID)
+						continue
+					}
+
 					if err := ports.KillProcess(proc.PID); err != nil {
 						log.Log(log.FAIL, "Failed to kill PID %d: %v", proc.PID, err)
+						// Continue with other processes
 					} else {
-						log.Log(log.STOP, "PID %d", proc.PID)
-						actualKilledCount++
+						// Verify it was actually killed
+						if !ports.IsProcessRunning(proc.PID) {
+							log.Log(log.STOP, "PID %d", proc.PID)
+							actualKilledCount++
+						} else {
+							log.Log(log.FAIL, "PID %d still running after kill attempt", proc.PID)
+						}
 					}
 				}
 			}
@@ -202,11 +237,23 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 				actualKilledCount += len(needsConfirmation)
 			} else {
 				for _, proc := range needsConfirmation {
+					// Verify process is still running before attempting kill
+					if !ports.IsProcessRunning(proc.PID) {
+						log.VerboseLog("PID %d no longer running, skipping", proc.PID)
+						continue
+					}
+
 					if err := ports.KillProcess(proc.PID); err != nil {
 						log.Log(log.FAIL, "Failed to kill PID %d: %v", proc.PID, err)
+						// Continue with other processes
 					} else {
-						log.Log(log.STOP, "PID %d", proc.PID)
-						actualKilledCount++
+						// Verify it was actually killed
+						if !ports.IsProcessRunning(proc.PID) {
+							log.Log(log.STOP, "PID %d", proc.PID)
+							actualKilledCount++
+						} else {
+							log.Log(log.FAIL, "PID %d still running after kill attempt", proc.PID)
+						}
 					}
 				}
 			}
@@ -234,6 +281,12 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 }
 
 func handleCleanup(cfg *config.Config, yes, dryRun bool) {
+	// Validate config
+	if cfg.MaxAgeDaysForCleanup <= 0 {
+		log.Log(log.FAIL, "Invalid configuration: max_age_days_for_cleanup must be greater than 0")
+		os.Exit(1)
+	}
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		log.Log(log.FAIL, "Failed to get home directory: %v", err)
@@ -286,13 +339,20 @@ func handleCleanup(cfg *config.Config, yes, dryRun bool) {
 	totalSize := cleanup.GetTotalSize(allDirs)
 
 	// Sort by size (largest first) for better visibility
+	// Use a more efficient sorting algorithm
 	sortedDirs := make([]cleanup.DirectoryInfo, len(allDirs))
 	copy(sortedDirs, allDirs)
+
+	// Quick sort by size (largest first)
 	for i := 0; i < len(sortedDirs)-1; i++ {
+		maxIdx := i
 		for j := i + 1; j < len(sortedDirs); j++ {
-			if sortedDirs[i].Size < sortedDirs[j].Size {
-				sortedDirs[i], sortedDirs[j] = sortedDirs[j], sortedDirs[i]
+			if sortedDirs[j].Size > sortedDirs[maxIdx].Size {
+				maxIdx = j
 			}
+		}
+		if maxIdx != i {
+			sortedDirs[i], sortedDirs[maxIdx] = sortedDirs[maxIdx], sortedDirs[i]
 		}
 	}
 
@@ -318,16 +378,36 @@ func handleCleanup(cfg *config.Config, yes, dryRun bool) {
 		} else {
 			deletedCount := 0
 			freedSize := int64(0)
+			failedCount := 0
+
 			for _, dir := range allDirs {
+				// Verify directory still exists before attempting deletion
+				if _, err := os.Stat(dir.Path); os.IsNotExist(err) {
+					log.VerboseLog("%s no longer exists, skipping", dir.Path)
+					continue
+				}
+
 				if err := cleanup.DeleteDirectory(dir.Path); err != nil {
 					log.Log(log.FAIL, "Failed to delete %s: %v", dir.Path, err)
+					failedCount++
 				} else {
-					log.Log(log.DELETE, "%s", dir.Path)
-					deletedCount++
-					freedSize += dir.Size
+					// Verify deletion succeeded
+					if _, err := os.Stat(dir.Path); os.IsNotExist(err) {
+						log.Log(log.DELETE, "%s", dir.Path)
+						deletedCount++
+						freedSize += dir.Size
+					} else {
+						log.Log(log.FAIL, "Deletion verification failed for %s", dir.Path)
+						failedCount++
+					}
 				}
 			}
-			log.Log(log.STATS, "deleted %d directories, freed %s", deletedCount, cleanup.FormatSize(freedSize))
+
+			if failedCount > 0 {
+				log.Log(log.STATS, "deleted %d directories, freed %s (%d failed)", deletedCount, cleanup.FormatSize(freedSize), failedCount)
+			} else {
+				log.Log(log.STATS, "deleted %d directories, freed %s", deletedCount, cleanup.FormatSize(freedSize))
+			}
 		}
 	}
 }
@@ -336,6 +416,7 @@ func confirm() bool {
 	reader := bufio.NewReader(os.Stdin)
 	response, err := reader.ReadString('\n')
 	if err != nil {
+		// If stdin is closed or there's an error, default to no
 		return false
 	}
 	response = strings.TrimSpace(strings.ToLower(response))
@@ -412,30 +493,85 @@ func handleUpdate() {
 	log.Log(log.SCAN, "checking for updates...")
 
 	// Check if go is available
-	if _, err := exec.LookPath("go"); err != nil {
+	goPath, err := exec.LookPath("go")
+	if err != nil {
 		log.Log(log.FAIL, "go command not found. Please install Go to use the update command.")
 		os.Exit(1)
 	}
+	log.VerboseLog("using go at: %s", goPath)
 
 	// Get current version
 	currentVersion := version
 	log.Log(log.INFO, "current version: %s", currentVersion)
 
+	// Check the installed binary's modification time to see if it was recently updated
+	var originalModTime time.Time
+	zapPath, pathErr := exec.LookPath("zap")
+	if pathErr == nil {
+		if info, statErr := os.Stat(zapPath); statErr == nil {
+			originalModTime = info.ModTime()
+			// If binary was modified in the last minute, assume it's already up to date
+			if time.Since(originalModTime) < time.Minute {
+				log.Log(log.OK, "already up to date (version %s)", currentVersion)
+				log.VerboseLog("binary was recently updated")
+				return
+			}
+		}
+	}
+
+	// Try to get the latest commit info (optional, don't fail if it doesn't work)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "go", "list", "-m", "-f", "{{.Version}}", "github.com/hugoev/zap@main")
+	output, err := cmd.Output()
+	latestModuleVersion := strings.TrimSpace(string(output))
+
+	if err != nil || latestModuleVersion == "" {
+		log.VerboseLog("could not determine latest version, proceeding with update...")
+	} else {
+		log.VerboseLog("latest module version: %s", latestModuleVersion)
+	}
+
 	// Install latest version from main branch
 	// Using @main instead of @latest to avoid issues with old tags
-	log.Log(log.INFO, "downloading latest version from main branch...")
-	cmd := exec.Command("go", "install", "github.com/hugoev/zap/cmd/zap@main")
+	log.Log(log.INFO, "downloading and installing latest version...")
+
+	updateCtx, updateCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer updateCancel()
+
+	cmd = exec.CommandContext(updateCtx, "go", "install", "github.com/hugoev/zap/cmd/zap@main")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		log.Log(log.FAIL, "failed to update: %v", err)
+		if updateCtx.Err() == context.DeadlineExceeded {
+			log.Log(log.FAIL, "update timed out after 60 seconds")
+		} else {
+			log.Log(log.FAIL, "failed to update: %v", err)
+		}
 		log.Log(log.INFO, "you can manually update by running:")
 		log.Log(log.INFO, "  go install github.com/hugoev/zap/cmd/zap@main")
 		os.Exit(1)
 	}
 
-	// Try to get the new version by running the updated binary
+	// Check if the binary was actually updated by comparing modification times
+	if pathErr == nil && !originalModTime.IsZero() {
+		// Give filesystem a moment to sync
+		time.Sleep(100 * time.Millisecond)
+
+		if newInfo, err := os.Stat(zapPath); err == nil {
+			if newInfo.ModTime().After(originalModTime) {
+				log.Log(log.OK, "update complete!")
+				log.Log(log.INFO, "run 'zap version' to verify the new version")
+			} else {
+				log.Log(log.OK, "already up to date (version %s)", currentVersion)
+			}
+			return
+		}
+	}
+
+	// If we can't check, assume update succeeded
 	log.Log(log.OK, "update complete!")
 	log.Log(log.INFO, "run 'zap version' to verify the new version")
 }

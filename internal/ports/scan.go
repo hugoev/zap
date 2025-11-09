@@ -1,6 +1,7 @@
 package ports
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os/exec"
@@ -33,13 +34,26 @@ var commonDevPorts = []int{
 
 func ScanPorts() ([]ProcessInfo, error) {
 	var processes []ProcessInfo
+	var scanErrors []error
 
 	for _, port := range commonDevPorts {
 		procs, err := getProcessesOnPort(port)
 		if err != nil {
+			// Log error but continue scanning other ports
+			scanErrors = append(scanErrors, fmt.Errorf("port %d: %w", port, err))
 			continue
 		}
 		processes = append(processes, procs...)
+	}
+
+	// If we got some processes, return them even if there were some scan errors
+	if len(processes) > 0 {
+		return processes, nil
+	}
+
+	// If no processes found but there were errors, return the first error
+	if len(scanErrors) > 0 {
+		return nil, fmt.Errorf("scan errors encountered: %w", scanErrors[0])
 	}
 
 	return processes, nil
@@ -48,17 +62,33 @@ func ScanPorts() ([]ProcessInfo, error) {
 func getProcessesOnPort(port int) ([]ProcessInfo, error) {
 	var processes []ProcessInfo
 
+	// Validate port number
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("invalid port number: %d (must be 1-65535)", port)
+	}
+
+	// Check if lsof command exists before using it
+	if _, err := exec.LookPath("lsof"); err != nil {
+		return nil, fmt.Errorf("lsof command not found. Please install lsof (usually pre-installed on macOS/Linux)")
+	}
+
 	// Use lsof to find processes listening on the port
 	// lsof is available on macOS and most Linux distributions
-	cmd := exec.Command("lsof", "-i", fmt.Sprintf(":%d", port), "-sTCP:LISTEN", "-P", "-n")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "lsof", "-i", fmt.Sprintf(":%d", port), "-sTCP:LISTEN", "-P", "-n")
 	output, err := cmd.Output()
 	if err != nil {
-		// Check if lsof command exists
-		if _, err := exec.LookPath("lsof"); err != nil {
-			return nil, fmt.Errorf("lsof command not found. Please install lsof (usually pre-installed on macOS/Linux)")
+		// Check if it was a timeout
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("timeout scanning port %d", port)
 		}
-		// No process found on this port (normal case)
-		return processes, nil
+		// Exit code 1 from lsof means no process found (normal case)
+		if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 1 {
+			return processes, nil
+		}
+		return nil, fmt.Errorf("lsof error on port %d: %w", port, err)
 	}
 
 	lines := strings.Split(string(output), "\n")
@@ -111,27 +141,32 @@ type processDetails struct {
 func getProcessDetails(pid int) processDetails {
 	details := processDetails{}
 
+	// Validate PID
+	if pid <= 0 {
+		return details
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
 	// Get command line (required, fail silently if can't get it)
-	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=")
+	cmd := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "command=")
 	output, err := cmd.Output()
-	if err == nil {
+	if err == nil && len(output) > 0 {
 		details.Cmd = strings.TrimSpace(string(output))
-	} else {
-		// Fallback: just use process name
-		details.Cmd = ""
 	}
 
 	// Get user (optional, continue if fails)
-	cmd = exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "user=")
+	cmd = exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "user=")
 	output, err = cmd.Output()
-	if err == nil {
+	if err == nil && len(output) > 0 {
 		details.User = strings.TrimSpace(string(output))
 	}
 
 	// Get start time and calculate runtime (optional)
-	cmd = exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=")
+	cmd = exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "lstart=")
 	output, err = cmd.Output()
-	if err == nil {
+	if err == nil && len(output) > 0 {
 		startStr := strings.TrimSpace(string(output))
 		if startStr != "" {
 			if t, err := parseProcessStartTime(startStr); err == nil {
@@ -142,7 +177,7 @@ func getProcessDetails(pid int) processDetails {
 	}
 
 	// Get working directory (optional, continue if fails)
-	cmd = exec.Command("lsof", "-p", strconv.Itoa(pid), "-a", "-d", "cwd", "-Fn")
+	cmd = exec.CommandContext(ctx, "lsof", "-p", strconv.Itoa(pid), "-a", "-d", "cwd", "-Fn")
 	output, err = cmd.Output()
 	if err == nil && len(output) > 0 {
 		lines := strings.Split(string(output), "\n")

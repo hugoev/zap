@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -32,13 +33,41 @@ var cleanupPatterns = []string{
 
 func ScanDirectories(rootPath string, shouldCleanup func(path string, modTime time.Time) bool, progressCallback func(string)) ([]DirectoryInfo, error) {
 	var directories []DirectoryInfo
+	var scanErrors []error
 
-	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+	// Validate root path exists and is a directory
+	rootInfo, err := os.Stat(rootPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("path does not exist: %s", rootPath)
+		}
+		if os.IsPermission(err) {
+			return nil, fmt.Errorf("permission denied: %s", rootPath)
+		}
+		return nil, fmt.Errorf("cannot access path %s: %w", rootPath, err)
+	}
+	if !rootInfo.IsDir() {
+		return nil, fmt.Errorf("path is not a directory: %s", rootPath)
+	}
+
+	err = filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // Skip errors
+			// Log permission errors but continue
+			if os.IsPermission(err) {
+				scanErrors = append(scanErrors, fmt.Errorf("permission denied: %s", path))
+				return nil // Skip this path, continue scanning
+			}
+			// For other errors, skip but log
+			scanErrors = append(scanErrors, fmt.Errorf("error accessing %s: %w", path, err))
+			return nil
 		}
 
 		if !info.IsDir() {
+			return nil
+		}
+
+		// Skip symlinks to avoid following them into unexpected places
+		if info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
 
@@ -61,10 +90,11 @@ func ScanDirectories(rootPath string, shouldCleanup func(path string, modTime ti
 			return nil
 		}
 
-		// Calculate directory size
+		// Calculate directory size with timeout protection
 		size, err := calculateDirSize(path)
 		if err != nil {
-			return nil // Skip if we can't calculate size
+			scanErrors = append(scanErrors, fmt.Errorf("failed to calculate size for %s: %w", path, err))
+			return filepath.SkipDir // Skip this directory but continue
 		}
 
 		// Check if should cleanup based on config
@@ -80,21 +110,57 @@ func ScanDirectories(rootPath string, shouldCleanup func(path string, modTime ti
 		return filepath.SkipDir
 	})
 
-	return directories, err
+	// Return results even if there were some errors (partial success)
+	if err != nil && len(directories) == 0 {
+		return nil, fmt.Errorf("scan failed: %w", err)
+	}
+
+	return directories, nil
 }
 
 func calculateDirSize(path string) (int64, error) {
 	var size int64
-	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+	var sizeErrors []error
+	fileCount := 0
+	maxFiles := 100000 // Limit to prevent excessive scanning
+
+	err := filepath.Walk(path, func(filePath string, info os.FileInfo, err error) error {
 		if err != nil {
+			// Log but continue - permission errors on individual files shouldn't stop us
+			if os.IsPermission(err) {
+				sizeErrors = append(sizeErrors, fmt.Errorf("permission denied: %s", filePath))
+				return nil
+			}
+			return err
+		}
+
+		// Skip symlinks
+		if info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
+
 		if !info.IsDir() {
 			size += info.Size()
+			fileCount++
+			// Safety limit to prevent excessive scanning
+			if fileCount > maxFiles {
+				return fmt.Errorf("directory too large (>%d files), size calculation stopped", maxFiles)
+			}
 		}
 		return nil
 	})
-	return size, err
+
+	// If we hit the file limit, return partial size with error
+	if err != nil && strings.Contains(err.Error(), "too large") {
+		return size, fmt.Errorf("directory size calculation incomplete (stopped at %d files): %w", fileCount, err)
+	}
+
+	// Return size even if there were some permission errors
+	if err != nil {
+		return size, fmt.Errorf("error calculating directory size: %w", err)
+	}
+
+	return size, nil
 }
 
 func FormatSize(bytes int64) string {

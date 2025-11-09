@@ -2,22 +2,24 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 type Config struct {
-	ProtectedPorts        []int    `json:"protected_ports"`
-	MaxAgeDaysForCleanup  int      `json:"max_age_days_for_cleanup"`
-	ExcludePaths          []string `json:"exclude_paths"`
-	AutoConfirmSafeActions bool    `json:"auto_confirm_safe_actions"`
+	ProtectedPorts         []int    `json:"protected_ports"`
+	MaxAgeDaysForCleanup   int      `json:"max_age_days_for_cleanup"`
+	ExcludePaths           []string `json:"exclude_paths"`
+	AutoConfirmSafeActions bool     `json:"auto_confirm_safe_actions"`
 }
 
 var defaultConfig = Config{
-	ProtectedPorts:        []int{5432, 6379, 3306, 27017}, // Postgres, Redis, MySQL, MongoDB
-	MaxAgeDaysForCleanup:  14,
-	ExcludePaths:          []string{},
+	ProtectedPorts:         []int{5432, 6379, 3306, 27017}, // Postgres, Redis, MySQL, MongoDB
+	MaxAgeDaysForCleanup:   14,
+	ExcludePaths:           []string{},
 	AutoConfirmSafeActions: false,
 }
 
@@ -94,24 +96,36 @@ func (c *Config) IsPortProtected(port int) bool {
 }
 
 func (c *Config) AddExcludePath(path string) error {
+	if path == "" {
+		return fmt.Errorf("path cannot be empty")
+	}
+
 	// Expand ~ to home directory
-	if path[:2] == "~/" {
+	if len(path) >= 2 && path[:2] == "~/" {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to get home directory: %w", err)
 		}
 		path = filepath.Join(homeDir, path[2:])
 	}
 
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to resolve absolute path: %w", err)
+	}
+
+	// Verify path exists
+	if _, err := os.Stat(absPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("path does not exist: %s", absPath)
+		}
+		return fmt.Errorf("cannot access path %s: %w", absPath, err)
 	}
 
 	// Check if already exists
 	for _, existing := range c.ExcludePaths {
 		if existing == absPath {
-			return nil
+			return nil // Already excluded
 		}
 	}
 
@@ -120,9 +134,18 @@ func (c *Config) AddExcludePath(path string) error {
 }
 
 func (c *Config) ShouldCleanup(path string, modTime time.Time) bool {
+	// Validate inputs
+	if path == "" {
+		return false
+	}
+	if modTime.IsZero() {
+		return false
+	}
+
 	// Check if path is excluded
 	absPath, err := filepath.Abs(path)
 	if err != nil {
+		// If we can't resolve the path, err on the side of caution and don't cleanup
 		return false
 	}
 
@@ -130,11 +153,24 @@ func (c *Config) ShouldCleanup(path string, modTime time.Time) bool {
 		if absPath == excluded {
 			return false
 		}
+		// Also check if the path is a subdirectory of an excluded path
+		rel, err := filepath.Rel(excluded, absPath)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, "..") {
+			return false
+		}
+	}
+
+	// Validate max age is reasonable
+	maxAgeDays := c.MaxAgeDaysForCleanup
+	if maxAgeDays <= 0 {
+		maxAgeDays = 14 // Default fallback
+	}
+	if maxAgeDays > 365 {
+		maxAgeDays = 365 // Cap at 1 year for safety
 	}
 
 	// Check if recently modified
 	age := time.Since(modTime)
-	maxAge := time.Duration(c.MaxAgeDaysForCleanup) * 24 * time.Hour
+	maxAge := time.Duration(maxAgeDays) * 24 * time.Hour
 	return age > maxAge
 }
-
