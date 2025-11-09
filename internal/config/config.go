@@ -58,6 +58,33 @@ func getBackupPath(configPath string) string {
 	return configPath + ".backup"
 }
 
+// checkDiskSpaceForConfig verifies sufficient disk space for config file operations
+func checkDiskSpaceForConfig(filePath string, requiredBytes int64) error {
+	if runtime.GOOS == "windows" {
+		// Windows: skip disk space check
+		return nil
+	}
+
+	var stat unix.Statfs_t
+	dir := filepath.Dir(filePath)
+	if err := unix.Statfs(dir, &stat); err != nil {
+		// If we can't check, allow operation (better than blocking)
+		return nil
+	}
+
+	// Calculate available space
+	availableBytes := int64(stat.Bavail) * int64(stat.Bsize)
+
+	// Require at least 2x the size to be available (safety margin)
+	requiredWithMargin := requiredBytes * 2
+
+	if availableBytes < requiredWithMargin {
+		return fmt.Errorf("insufficient disk space: need %d bytes, have %d bytes available", requiredWithMargin, availableBytes)
+	}
+
+	return nil
+}
+
 func Load() (*Config, error) {
 	configMutex.RLock()
 	defer configMutex.RUnlock()
@@ -254,6 +281,11 @@ func saveWithLock(cfg *Config) error {
 		return err
 	}
 
+	// Check disk space before writing (prevent corruption from disk full)
+	if err := checkDiskSpaceForConfig(configPath, int64(len(data))); err != nil {
+		return fmt.Errorf("insufficient disk space for config save: %w", err)
+	}
+
 	// Atomic write: write to temp file, then rename
 	tempPath := configPath + ".tmp"
 
@@ -280,10 +312,14 @@ func saveWithLock(cfg *Config) error {
 			return fmt.Errorf("failed to sync config: %w", err)
 		}
 
-		// Create backup before replacing
+		// Create backup before replacing (check disk space first)
 		if existingData, readErr := os.ReadFile(configPath); readErr == nil {
 			backupPath := getBackupPath(configPath)
-			os.WriteFile(backupPath, existingData, 0644)
+			// Check disk space for backup
+			if backupErr := checkDiskSpaceForConfig(backupPath, int64(len(existingData))); backupErr == nil {
+				os.WriteFile(backupPath, existingData, 0644)
+			}
+			// Log but don't fail - backup is optional
 		}
 
 		// Atomic rename (atomic on most filesystems)
@@ -297,10 +333,14 @@ func saveWithLock(cfg *Config) error {
 		}
 		defer os.Remove(tempPath) // Cleanup on error
 
-		// Create backup before replacing
+		// Create backup before replacing (check disk space first)
 		if existingData, readErr := os.ReadFile(configPath); readErr == nil {
 			backupPath := getBackupPath(configPath)
-			os.WriteFile(backupPath, existingData, 0644)
+			// Check disk space for backup
+			if backupErr := checkDiskSpaceForConfig(backupPath, int64(len(existingData))); backupErr == nil {
+				os.WriteFile(backupPath, existingData, 0644)
+			}
+			// Log but don't fail - backup is optional
 		}
 
 		// Atomic rename

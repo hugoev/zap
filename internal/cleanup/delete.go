@@ -3,6 +3,7 @@ package cleanup
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -37,10 +38,38 @@ func DeleteDirectory(path string) error {
 		return fmt.Errorf("disk space check failed: %w", err)
 	}
 
-	// Attempt deletion
-	err = os.RemoveAll(path)
+	// Attempt deletion with retry logic (handles active writes)
+	maxRetries := 3
+	baseDelay := 100 * time.Millisecond
+	
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		err = os.RemoveAll(path)
+		if err == nil {
+			// Success
+			break
+		}
+		
+		lastErr = err
+		
+		// Check if error is transient (file/directory busy, permission denied temporarily)
+		errStr := err.Error()
+		isTransient := strings.Contains(errStr, "device or resource busy") ||
+			strings.Contains(errStr, "resource temporarily unavailable") ||
+			strings.Contains(errStr, "permission denied")
+		
+		if !isTransient || attempt == maxRetries {
+			// Not a transient error or last attempt
+			break
+		}
+		
+		// Exponential backoff: 100ms, 200ms, 400ms
+		delay := baseDelay * time.Duration(1<<uint(attempt-1))
+		time.Sleep(delay)
+	}
+	
 	if err != nil {
-		return fmt.Errorf("failed to delete %s: %w", path, err)
+		return fmt.Errorf("failed to delete %s after %d attempts: %w", path, maxRetries, lastErr)
 	}
 
 	// Verify deletion succeeded

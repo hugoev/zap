@@ -20,10 +20,28 @@ const (
 	ProcessCheckInterval = 100 * time.Millisecond
 )
 
+// KillProcessWithVerification kills a process after verifying it matches expected details
+// This prevents PID reuse race conditions
+func KillProcessWithVerification(pid int, expected ProcessInfo) error {
+	// Verify process still matches expected details (prevents PID reuse)
+	matches, err := VerifyProcessMatches(pid, expected)
+	if err != nil || !matches {
+		return fmt.Errorf("process verification failed (PID may have been reused): %w", err)
+	}
+
+	return KillProcess(pid)
+}
+
 func KillProcess(pid int) error {
 	// First verify the process exists and is running
 	if !IsProcessRunning(pid) {
 		return fmt.Errorf("process %d is not running", pid)
+	}
+
+	// Check if process is in uninterruptible sleep (cannot be killed)
+	if isUninterruptible, err := IsProcessUninterruptible(pid); err == nil && isUninterruptible {
+		state, _ := GetProcessState(pid)
+		return fmt.Errorf("process %d is in uninterruptible sleep (state: %s) and cannot be killed. This usually indicates a kernel I/O wait. The process may resolve on its own or require system reboot", pid, state)
 	}
 
 	// Check permissions before attempting to kill

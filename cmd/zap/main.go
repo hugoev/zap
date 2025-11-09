@@ -466,14 +466,21 @@ func handlePorts(ctx context.Context, cfg *config.Config, yes, dryRun, jsonOutpu
 						continue
 					}
 
-					if err := ports.KillProcess(proc.PID); err != nil {
+					// Use verification to prevent PID reuse race condition
+					if err := ports.KillProcessWithVerification(proc.PID, proc); err != nil {
 						log.Log(log.FAIL, "Failed to kill PID %d: %v", proc.PID, err)
 						// Continue with other processes
 					} else {
-						// Verify it was actually killed
+						// Verify it was actually killed and port is free
 						if !ports.IsProcessRunning(proc.PID) {
 							log.Log(log.STOP, "PID %d", proc.PID)
 							actualKilledCount++
+							
+							// Verify port is actually free (detect immediate reuse)
+							time.Sleep(100 * time.Millisecond) // Brief delay for port release
+							if ports.IsPortInUse(proc.Port) {
+								log.VerboseLog("Port %d immediately reused by another process", proc.Port)
+							}
 						} else {
 							log.Log(log.FAIL, "PID %d still running after kill attempt", proc.PID)
 						}
@@ -511,14 +518,21 @@ func handlePorts(ctx context.Context, cfg *config.Config, yes, dryRun, jsonOutpu
 						continue
 					}
 
-					if err := ports.KillProcess(proc.PID); err != nil {
+					// Use verification to prevent PID reuse race condition
+					if err := ports.KillProcessWithVerification(proc.PID, proc); err != nil {
 						log.Log(log.FAIL, "Failed to kill PID %d: %v", proc.PID, err)
 						// Continue with other processes
 					} else {
-						// Verify it was actually killed
+						// Verify it was actually killed and port is free
 						if !ports.IsProcessRunning(proc.PID) {
 							log.Log(log.STOP, "PID %d", proc.PID)
 							actualKilledCount++
+							
+							// Verify port is actually free (detect immediate reuse)
+							time.Sleep(100 * time.Millisecond) // Brief delay for port release
+							if ports.IsPortInUse(proc.Port) {
+								log.VerboseLog("Port %d immediately reused by another process", proc.Port)
+							}
 						} else {
 							log.Log(log.FAIL, "PID %d still running after kill attempt", proc.PID)
 						}
