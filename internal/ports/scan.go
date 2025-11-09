@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -22,14 +23,35 @@ type ProcessInfo struct {
 }
 
 var commonDevPorts = []int{
-	3000, 3001, 3002, 3003, // Node.js, React
-	5173, 5174, 5175, // Vite
-	8000, 8001, 8080, 8081, // Python, Go, general
-	4000, 4001, // SvelteKit
-	5000, 5001, // Flask
-	4200,       // Angular
-	9000, 9001, // Play framework
-	7000, 7001, // Phoenix
+	// Node.js, React, Next.js
+	3000, 3001, 3002, 3003, 3004, 3005,
+	// Vite, Vite-based frameworks
+	5173, 5174, 5175, 5176, 5177,
+	// Python (Flask, Django, FastAPI, Uvicorn)
+	5000, 5001, 8000, 8001, 8080, 8081, 8888,
+	// Go, Rust, general dev servers
+	4000, 4001, 4002, 4003,
+	// Angular
+	4200, 4201,
+	// SvelteKit
+	5173, 5174,
+	// Play framework, Scala
+	9000, 9001, 9002,
+	// Phoenix, Elixir
+	4000, 4001,
+	// Ruby on Rails
+	3000, 3001,
+	// Remix, SvelteKit
+	3000, 5173,
+	// Bun, Deno
+	3000, 8000,
+	// Java Spring Boot
+	8080, 8081, 8082,
+	// .NET
+	5000, 5001,
+	// Additional common ranges
+	7000, 7001, 7002, // Phoenix, LiveView
+	6000, 6001,       // Additional dev servers
 }
 
 func ScanPorts() ([]ProcessInfo, error) {
@@ -67,30 +89,80 @@ func getProcessesOnPort(port int) ([]ProcessInfo, error) {
 		return nil, fmt.Errorf("invalid port number: %d (must be 1-65535)", port)
 	}
 
-	// Check if lsof command exists before using it
-	if _, err := exec.LookPath("lsof"); err != nil {
-		return nil, fmt.Errorf("lsof command not found. Please install lsof (usually pre-installed on macOS/Linux)")
-	}
-
-	// Use lsof to find processes listening on the port
-	// lsof is available on macOS and most Linux distributions
+	// Try multiple methods for cross-platform compatibility
+	// 1. Try lsof first (macOS and most Linux)
+	// 2. Fallback to ss (modern Linux)
+	// 3. Fallback to netstat (older Linux)
+	
+	var output []byte
+	var err error
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "lsof", "-i", fmt.Sprintf(":%d", port), "-sTCP:LISTEN", "-P", "-n")
-	output, err := cmd.Output()
-	if err != nil {
-		// Check if it was a timeout
+	// Method 1: lsof (macOS, most Linux)
+	if lsofPath, err := exec.LookPath("lsof"); err == nil {
+		cmd := exec.CommandContext(ctx, lsofPath, "-i", fmt.Sprintf(":%d", port), "-sTCP:LISTEN", "-P", "-n")
+		output, err = cmd.Output()
+		if err == nil {
+			// Success with lsof
+			return parseLsofOutput(output, port)
+		}
+		// If timeout, return error
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("timeout scanning port %d", port)
 		}
-		// Exit code 1 from lsof means no process found (normal case)
+		// Exit code 1 means no process found (normal)
 		if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 1 {
 			return processes, nil
 		}
-		return nil, fmt.Errorf("lsof error on port %d: %w", port, err)
+		// Other lsof errors, try fallback
 	}
 
+	// Method 2: ss (modern Linux, faster than netstat)
+	if ssPath, err := exec.LookPath("ss"); err == nil {
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel2()
+		cmd := exec.CommandContext(ctx2, ssPath, "-tlnp", fmt.Sprintf("sport = :%d", port))
+		output, err = cmd.Output()
+		if err == nil {
+			return parseSsOutput(output, port)
+		}
+		if ctx2.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("timeout scanning port %d", port)
+		}
+		// Exit code 1 means no process found
+		if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 1 {
+			return processes, nil
+		}
+	}
+
+	// Method 3: netstat (fallback for older Linux)
+	if netstatPath, err := exec.LookPath("netstat"); err == nil {
+		ctx3, cancel3 := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel3()
+		// Try different netstat flags for different systems
+		cmd := exec.CommandContext(ctx3, netstatPath, "-tlnp")
+		output, err = cmd.Output()
+		if err == nil {
+			return parseNetstatOutput(output, port)
+		}
+		if ctx3.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("timeout scanning port %d", port)
+		}
+	}
+
+	// If all methods failed and we didn't find lsof initially, return error
+	if _, err := exec.LookPath("lsof"); err != nil {
+		return nil, fmt.Errorf("no port scanning tools found (lsof, ss, or netstat). Please install one of them")
+	}
+
+	// If we got here, lsof exists but failed - return the original error
+	return nil, fmt.Errorf("failed to scan port %d: %w", port, err)
+}
+
+// parseLsofOutput parses lsof output (macOS and most Linux)
+func parseLsofOutput(output []byte, port int) ([]ProcessInfo, error) {
+	var processes []ProcessInfo
 	lines := strings.Split(string(output), "\n")
 	if len(lines) < 2 {
 		return processes, nil
@@ -130,6 +202,121 @@ func getProcessesOnPort(port int) ([]ProcessInfo, error) {
 	return processes, nil
 }
 
+// parseSsOutput parses ss output (modern Linux)
+func parseSsOutput(output []byte, port int) ([]ProcessInfo, error) {
+	var processes []ProcessInfo
+	lines := strings.Split(string(output), "\n")
+	if len(lines) < 2 {
+		return processes, nil
+	}
+
+	for _, line := range lines[1:] {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		// ss output format: LISTEN 0 128 *:3000 *:* users:(("node",pid=12345,fd=20))
+		// Extract PID from users: section
+		pidStart := strings.Index(line, "pid=")
+		if pidStart == -1 {
+			continue
+		}
+		pidEnd := strings.Index(line[pidStart+4:], ",")
+		if pidEnd == -1 {
+			pidEnd = strings.Index(line[pidStart+4:], ")")
+		}
+		if pidEnd == -1 {
+			continue
+		}
+
+		pidStr := line[pidStart+4 : pidStart+4+pidEnd]
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+
+		// Extract process name from users: section
+		nameStart := strings.Index(line, "(\"")
+		nameEnd := strings.Index(line, "\",")
+		if nameStart == -1 || nameEnd == -1 {
+			nameStart = strings.Index(line, "(")
+			nameEnd = strings.Index(line, ",")
+		}
+		var cmdName string
+		if nameStart != -1 && nameEnd != -1 && nameEnd > nameStart {
+			cmdName = line[nameStart+2 : nameEnd]
+		}
+
+		procInfo := getProcessDetails(pid)
+		if cmdName == "" {
+			cmdName = procInfo.Cmd
+			if spaceIdx := strings.Index(cmdName, " "); spaceIdx > 0 {
+				cmdName = cmdName[:spaceIdx]
+			}
+		}
+
+		processes = append(processes, ProcessInfo{
+			PID:        pid,
+			Port:       port,
+			Name:       cmdName,
+			Cmd:        procInfo.Cmd,
+			User:       procInfo.User,
+			StartTime:  procInfo.StartTime,
+			Runtime:    procInfo.Runtime,
+			WorkingDir: procInfo.WorkingDir,
+		})
+	}
+
+	return processes, nil
+}
+
+// parseNetstatOutput parses netstat output (older Linux fallback)
+func parseNetstatOutput(output []byte, port int) ([]ProcessInfo, error) {
+	var processes []ProcessInfo
+	lines := strings.Split(string(output), "\n")
+	portStr := fmt.Sprintf(":%d", port)
+
+	for _, line := range lines {
+		if !strings.Contains(line, portStr) || !strings.Contains(line, "LISTEN") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 7 {
+			continue
+		}
+
+		// netstat format varies, try to extract PID from last field
+		// Format: tcp 0 0 0.0.0.0:3000 0.0.0.0:* LISTEN 12345/node
+		lastField := fields[len(fields)-1]
+		parts := strings.Split(lastField, "/")
+		if len(parts) < 2 {
+			continue
+		}
+
+		pid, err := strconv.Atoi(parts[0])
+		if err != nil {
+			continue
+		}
+
+		cmdName := parts[1]
+		procInfo := getProcessDetails(pid)
+
+		processes = append(processes, ProcessInfo{
+			PID:        pid,
+			Port:       port,
+			Name:       cmdName,
+			Cmd:        procInfo.Cmd,
+			User:       procInfo.User,
+			StartTime:  procInfo.StartTime,
+			Runtime:    procInfo.Runtime,
+			WorkingDir: procInfo.WorkingDir,
+		})
+	}
+
+	return processes, nil
+}
+
 type processDetails struct {
 	Cmd        string
 	User       string
@@ -149,54 +336,116 @@ func getProcessDetails(pid int) processDetails {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Get command line (required, fail silently if can't get it)
-	cmd := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "command=")
-	output, err := cmd.Output()
-	if err == nil && len(output) > 0 {
-		details.Cmd = strings.TrimSpace(string(output))
+	// Try to detect platform for optimal ps command
+	// macOS uses BSD ps, Linux uses GNU ps (usually)
+	// Try BSD format first (works on macOS and some Linux)
+	psFormats := []struct {
+		cmdFormat string
+		args      []string
+	}{
+		// BSD format (macOS, some Linux)
+		{"ps", []string{"-p", strconv.Itoa(pid), "-o", "command="}},
+		// GNU format (most Linux)
+		{"ps", []string{"-p", strconv.Itoa(pid), "-o", "cmd="}},
 	}
 
-	// Get user (optional, continue if fails)
-	cmd = exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "user=")
-	output, err = cmd.Output()
-	if err == nil && len(output) > 0 {
-		details.User = strings.TrimSpace(string(output))
+	// Get command line
+	for _, format := range psFormats {
+		cmd := exec.CommandContext(ctx, format.cmdFormat, format.args...)
+		output, err := cmd.Output()
+		if err == nil && len(output) > 0 {
+			details.Cmd = strings.TrimSpace(string(output))
+			break
+		}
 	}
 
-	// Get start time and calculate runtime (optional)
-	cmd = exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "lstart=")
-	output, err = cmd.Output()
-	if err == nil && len(output) > 0 {
-		startStr := strings.TrimSpace(string(output))
-		if startStr != "" {
-			if t, err := parseProcessStartTime(startStr); err == nil {
-				details.StartTime = t
-				details.Runtime = time.Since(t)
+	// Get user (try both formats)
+	userFormats := []struct {
+		args []string
+	}{
+		{[]string{"-p", strconv.Itoa(pid), "-o", "user="}},
+		{[]string{"-p", strconv.Itoa(pid), "-o", "uid="}},
+	}
+	for _, format := range userFormats {
+		cmd := exec.CommandContext(ctx, "ps", format.args...)
+		output, err := cmd.Output()
+		if err == nil && len(output) > 0 {
+			details.User = strings.TrimSpace(string(output))
+			break
+		}
+	}
+
+	// Get start time and calculate runtime (try multiple formats)
+	startFormats := []struct {
+		args []string
+	}{
+		{[]string{"-p", strconv.Itoa(pid), "-o", "lstart="}}, // BSD/macOS
+		{[]string{"-p", strconv.Itoa(pid), "-o", "start="}}, // GNU/Linux
+	}
+	for _, format := range startFormats {
+		cmd := exec.CommandContext(ctx, "ps", format.args...)
+		output, err := cmd.Output()
+		if err == nil && len(output) > 0 {
+			startStr := strings.TrimSpace(string(output))
+			if startStr != "" {
+				if t, err := parseProcessStartTime(startStr); err == nil {
+					details.StartTime = t
+					details.Runtime = time.Since(t)
+					break
+				}
 			}
 		}
 	}
 
-	// Get working directory (optional, continue if fails)
-	cmd = exec.CommandContext(ctx, "lsof", "-p", strconv.Itoa(pid), "-a", "-d", "cwd", "-Fn")
-	output, err = cmd.Output()
-	if err == nil && len(output) > 0 {
-		lines := strings.Split(string(output), "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(line, "n") {
-				details.WorkingDir = strings.TrimPrefix(line, "n")
-				break
+	// Get working directory - try multiple methods
+	// Method 1: lsof (macOS, most Linux)
+	if lsofPath, err := exec.LookPath("lsof"); err == nil {
+		cmd := exec.CommandContext(ctx, lsofPath, "-p", strconv.Itoa(pid), "-a", "-d", "cwd", "-Fn")
+		output, err := cmd.Output()
+		if err == nil && len(output) > 0 {
+			lines := strings.Split(string(output), "\n")
+			for _, line := range lines {
+				if strings.HasPrefix(line, "n") {
+					details.WorkingDir = strings.TrimPrefix(line, "n")
+					return details
+				}
 			}
 		}
+	}
+
+	// Method 2: pwdx (Linux)
+	if pwdxPath, err := exec.LookPath("pwdx"); err == nil {
+		cmd := exec.CommandContext(ctx, pwdxPath, strconv.Itoa(pid))
+		output, err := cmd.Output()
+		if err == nil && len(output) > 0 {
+			// pwdx output: "PID: /path/to/dir"
+			parts := strings.SplitN(strings.TrimSpace(string(output)), ":", 2)
+			if len(parts) == 2 {
+				details.WorkingDir = strings.TrimSpace(parts[1])
+				return details
+			}
+		}
+	}
+
+	// Method 3: readlink /proc/PID/cwd (Linux)
+	procCwd := fmt.Sprintf("/proc/%d/cwd", pid)
+	if linkPath, err := os.Readlink(procCwd); err == nil {
+		details.WorkingDir = linkPath
 	}
 
 	return details
 }
 
 func parseProcessStartTime(startStr string) (time.Time, error) {
-	// ps lstart format: "Mon Jan 2 15:04:05 2006"
+	// ps lstart format varies by platform:
+	// macOS/Linux: "Mon Jan 2 15:04:05 2006" or "Mon Jan  2 15:04:05 2006"
+	// Some Linux: "Mon Jan  2 15:04:05 2006" (with extra spaces)
 	layouts := []string{
 		"Mon Jan 2 15:04:05 2006",
-		"Mon Jan  2 15:04:05 2006",
+		"Mon Jan  2 15:04:05 2006",  // Single digit day with extra space
+		"Mon  Jan 2 15:04:05 2006",  // Extra space after day name
+		"Mon  Jan  2 15:04:05 2006", // Both extra spaces
+		"2006-01-02 15:04:05",       // ISO format (some systems)
 	}
 
 	for _, layout := range layouts {
@@ -220,50 +469,103 @@ func IsPortInUse(port int) bool {
 func IsSafeDevServer(proc ProcessInfo) bool {
 	cmdLower := strings.ToLower(proc.Cmd)
 	nameLower := strings.ToLower(proc.Name)
+	workingDirLower := strings.ToLower(proc.WorkingDir)
 
 	// Node.js dev servers
-	if strings.Contains(cmdLower, "node") && (strings.Contains(cmdLower, "vite") ||
-		strings.Contains(cmdLower, "next") ||
-		strings.Contains(cmdLower, "react") ||
-		strings.Contains(cmdLower, "webpack") ||
-		strings.Contains(cmdLower, "nodemon") ||
-		strings.Contains(cmdLower, "ts-node") ||
-		strings.Contains(cmdLower, "tsx")) {
+	nodeDevPatterns := []string{
+		"vite", "next", "react", "webpack", "nodemon", "ts-node", "tsx",
+		"remix", "svelte", "nuxt", "astro", "gatsby", "parcel",
+		"rollup", "esbuild", "swc", "turbo",
+	}
+	if strings.Contains(cmdLower, "node") {
+		for _, pattern := range nodeDevPatterns {
+			if strings.Contains(cmdLower, pattern) {
+				return true
+			}
+		}
+	}
+
+	// Modern JavaScript runtimes
+	if strings.Contains(cmdLower, "bun") || nameLower == "bun" {
+		return true
+	}
+	if strings.Contains(cmdLower, "deno") || nameLower == "deno" {
 		return true
 	}
 
-	// Vite
+	// Vite and Vite-based frameworks
 	if strings.Contains(cmdLower, "vite") {
 		return true
 	}
 
 	// Python dev servers
-	if strings.Contains(cmdLower, "python") && (strings.Contains(cmdLower, "flask") ||
-		strings.Contains(cmdLower, "django") ||
-		strings.Contains(cmdLower, "uvicorn") ||
-		strings.Contains(cmdLower, "gunicorn") ||
-		strings.Contains(cmdLower, "runserver")) {
-		return true
+	pythonDevPatterns := []string{
+		"flask", "django", "uvicorn", "gunicorn", "runserver",
+		"fastapi", "starlette", "quart", "sanic",
+	}
+	if strings.Contains(cmdLower, "python") || strings.Contains(cmdLower, "python3") {
+		for _, pattern := range pythonDevPatterns {
+			if strings.Contains(cmdLower, pattern) {
+				return true
+			}
+		}
 	}
 
 	// Go dev servers
-	if strings.Contains(cmdLower, "go") && (strings.Contains(cmdLower, "run") ||
-		strings.Contains(cmdLower, "air")) {
-		return true
+	goDevPatterns := []string{"run", "air", "fresh", "fiber", "gin", "echo"}
+	if strings.Contains(cmdLower, "go") {
+		for _, pattern := range goDevPatterns {
+			if strings.Contains(cmdLower, pattern) {
+				return true
+			}
+		}
 	}
 
 	// Ruby/Rails
-	if strings.Contains(cmdLower, "rails") || strings.Contains(cmdLower, "rackup") {
+	if strings.Contains(cmdLower, "rails") || strings.Contains(cmdLower, "rackup") ||
+		strings.Contains(cmdLower, "puma") || strings.Contains(cmdLower, "unicorn") {
 		return true
 	}
 
 	// Elixir/Phoenix
-	if strings.Contains(cmdLower, "phoenix") || strings.Contains(cmdLower, "mix phx.server") {
+	if strings.Contains(cmdLower, "phoenix") || strings.Contains(cmdLower, "mix phx.server") ||
+		strings.Contains(cmdLower, "elixir") {
 		return true
 	}
 
-	// Generic node process on common dev port
-	if nameLower == "node" && proc.Port >= 3000 && proc.Port < 9000 {
+	// Rust dev servers
+	if strings.Contains(cmdLower, "cargo") && (strings.Contains(cmdLower, "run") ||
+		strings.Contains(cmdLower, "watch")) {
+		return true
+	}
+
+	// Java/Kotlin dev servers
+	if strings.Contains(cmdLower, "gradle") && strings.Contains(cmdLower, "bootrun") {
+		return true
+	}
+	if strings.Contains(cmdLower, "mvn") && strings.Contains(cmdLower, "spring-boot:run") {
+		return true
+	}
+
+	// .NET dev servers
+	if strings.Contains(cmdLower, "dotnet") && strings.Contains(cmdLower, "watch") {
+		return true
+	}
+
+	// Check working directory for common dev indicators
+	devIndicators := []string{"package.json", "go.mod", "requirements.txt", "pom.xml", "build.gradle"}
+	for _, indicator := range devIndicators {
+		if strings.Contains(workingDirLower, indicator) {
+			// If in a project directory with dev indicators, likely a dev server
+			if nameLower == "node" || nameLower == "python" || nameLower == "go" {
+				return true
+			}
+		}
+	}
+
+	// Generic node/python/go process on common dev port
+	if (nameLower == "node" || nameLower == "python" || nameLower == "python3" || nameLower == "go") &&
+		proc.Port >= 3000 && proc.Port < 10000 {
 		return true
 	}
 

@@ -33,31 +33,33 @@ zap cleanup --dry-run
 ## What It Does
 
 **Port Management:**
+
 - Finds processes on common dev ports (3000, 5173, 8000, etc.)
 - Safely terminates orphaned dev servers
 - Protects infrastructure (Postgres, Redis, Docker)
 
 **Workspace Cleanup:**
+
 - Finds stale `node_modules`, `.venv`, `.cache`, build artifacts
 - Shows size and age
 - Respects recent modifications
 
 ## Commands
 
-| Command       | Description |
-|-------------|-------------|
-| `zap ports`   | Scan and free up ports |
+| Command       | Description                           |
+| ------------- | ------------------------------------- |
+| `zap ports`   | Scan and free up ports                |
 | `zap cleanup` | Remove stale dependency/cache folders |
-| `zap version` | Show version |
-| `zap update`  | Update to latest version |
+| `zap version` | Show version                          |
+| `zap update`  | Update to latest version              |
 
 ## Flags
 
-| Flag              | Description |
-|------------------|-------------|
+| Flag              | Description                                      |
+| ----------------- | ------------------------------------------------ |
 | `--yes`, `-y`     | Execute without confirmation (safe actions only) |
-| `--dry-run`       | Preview actions without making changes |
-| `--verbose`, `-v` | Show detailed information |
+| `--dry-run`       | Preview actions without making changes           |
+| `--verbose`, `-v` | Show detailed information                        |
 
 ## Example Output
 
@@ -111,18 +113,18 @@ Configuration is optional and stored at `~/.config/zap/config.json`. Settings up
 
 ## Log Levels
 
-| Code   | Meaning |
-|--------|---------|
-| SCAN   | Discovery/search operation |
-| FOUND  | Candidate resource located |
+| Code   | Meaning                               |
+| ------ | ------------------------------------- |
+| SCAN   | Discovery/search operation            |
+| FOUND  | Candidate resource located            |
 | SKIP   | Resource intentionally left untouched |
-| ACTION | Confirmation prompt |
-| STOP   | Process terminated |
-| DELETE | Directory removed |
-| OK     | Successful completion |
-| FAIL   | Operation error |
-| INFO   | Detailed information (verbose mode) |
-| STATS  | Summary statistics |
+| ACTION | Confirmation prompt                   |
+| STOP   | Process terminated                    |
+| DELETE | Directory removed                     |
+| OK     | Successful completion                 |
+| FAIL   | Operation error                       |
+| INFO   | Detailed information (verbose mode)   |
+| STATS  | Summary statistics                    |
 
 ## The Problem
 

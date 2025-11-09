@@ -15,20 +15,50 @@ type DirectoryInfo struct {
 }
 
 var cleanupPatterns = []string{
+	// Node.js
 	"node_modules",
-	".venv",
-	".cache",
-	".gradle",
-	".mypy_cache",
-	"__pycache__",
-	".pytest_cache",
-	"target", // Rust/Cargo
-	"dist",
-	"build",
 	".next",
 	".turbo",
 	".nuxt",
 	".output",
+	".vite",
+	".svelte-kit",
+	".astro",
+	"dist",
+	"build",
+	".cache",
+	// Python
+	".venv",
+	"venv",
+	"__pycache__",
+	".pytest_cache",
+	".mypy_cache",
+	".ruff_cache",
+	".coverage",
+	"*.egg-info",
+	// Rust/Cargo
+	"target",
+	// Java/Kotlin
+	".gradle",
+	"build",
+	".m2",
+	// Go
+	"vendor",
+	// General
+	".cache",
+	".DS_Store",
+	"Thumbs.db",
+	// Bun
+	".bun",
+	"bun.lockb",
+	// Deno
+	".deno",
+	// TypeScript
+	"*.tsbuildinfo",
+	// Other
+	".parcel-cache",
+	".eslintcache",
+	".stylelintcache",
 }
 
 func ScanDirectories(rootPath string, shouldCleanup func(path string, modTime time.Time) bool, progressCallback func(string)) ([]DirectoryInfo, error) {
