@@ -40,8 +40,55 @@ jobs:
             echo "version=false" >> $GITHUB_OUTPUT
           fi
 
-  bump-version:
+  analyze-commits:
     needs: detect-changes
+    if: needs.detect-changes.outputs.should_bump == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      bump_type: ${{ steps.analyze.outputs.bump_type }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Analyze commit messages for bump type
+        id: analyze
+        run: |
+          # Get commits since last tag (or last 10 if no tag)
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"%s" -10)
+          else
+            COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"%s" --no-merges)
+          fi
+          
+          BUMP_TYPE="patch"  # Default to patch
+          
+          # Check for BREAKING changes (major bump)
+          if echo "$COMMITS" | grep -qiE '^(BREAKING|major):'; then
+            BUMP_TYPE="major"
+            echo "🔴 Found BREAKING change - will bump MAJOR version"
+          # Check for features (minor bump)
+          elif echo "$COMMITS" | grep -qiE '^(feat|feature):'; then
+            BUMP_TYPE="minor"
+            echo "🟢 Found feature - will bump MINOR version"
+          # Check for fixes (patch bump)
+          elif echo "$COMMITS" | grep -qiE '^(fix|bugfix):'; then
+            BUMP_TYPE="patch"
+            echo "🔵 Found fix - will bump PATCH version"
+          else
+            # Default to patch for any other changes
+            BUMP_TYPE="patch"
+            echo "ℹ️  No specific commit type found - defaulting to PATCH bump"
+          fi
+          
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "✅ Bump type determined: $BUMP_TYPE"
+
+  bump-version:
+    needs: [detect-changes, analyze-commits]
     if: needs.detect-changes.outputs.should_bump == 'true'
     runs-on: ubuntu-latest
     outputs:
@@ -78,17 +125,39 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "✅ Current version: $VERSION"
       
-      - name: Bump patch version
+      - name: Bump version based on commit type
         id: bump
         run: |
           OLD_VERSION="${{ steps.current.outputs.version }}"
+          BUMP_TYPE="${{ needs.analyze-commits.outputs.bump_type }}"
           
           # Parse version parts
           IFS='.' read -r MAJOR MINOR PATCH <<< "$OLD_VERSION"
           
-          # Increment patch version
-          NEW_PATCH=$((PATCH + 1))
-          NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+          # Bump based on type
+          case "$BUMP_TYPE" in
+            major)
+              NEW_MAJOR=$((MAJOR + 1))
+              NEW_VERSION="${NEW_MAJOR}.0.0"
+              echo "🔴 MAJOR bump: $OLD_VERSION → $NEW_VERSION"
+              ;;
+            minor)
+              NEW_MINOR=$((MINOR + 1))
+              NEW_VERSION="${MAJOR}.${NEW_MINOR}.0"
+              echo "🟢 MINOR bump: $OLD_VERSION → $NEW_VERSION"
+              ;;
+            patch)
+              NEW_PATCH=$((PATCH + 1))
+              NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+              echo "🔵 PATCH bump: $OLD_VERSION → $NEW_VERSION"
+              ;;
+            *)
+              # Default to patch if unknown
+              NEW_PATCH=$((PATCH + 1))
+              NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+              echo "ℹ️  Default PATCH bump: $OLD_VERSION → $NEW_VERSION"
+              ;;
+          esac
           
           echo "old_version=$OLD_VERSION" >> $GITHUB_OUTPUT
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT

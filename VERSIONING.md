@@ -10,43 +10,74 @@ const version = "0.3.0"
 
 ## Automated Release Workflow
 
-**Versioning is now automated!** When you push a version change to GitHub, the workflow automatically:
+**Versioning is fully automated!** The workflow uses commit message conventions to automatically determine version bumps:
 
-1. ✅ Detects the version change in `cmd/zap/main.go`
-2. ✅ Validates the semantic version format
-3. ✅ Creates a git tag (e.g., `v0.3.0`)
-4. ✅ Creates a GitHub release with changelog
-5. ✅ Prevents duplicate releases for the same version
+1. ✅ Detects changes to any `.go` file
+2. ✅ Analyzes commit messages to determine bump type (major/minor/patch)
+3. ✅ Auto-bumps version based on commit type
+4. ✅ Creates git tag (e.g., `v0.3.1`, `v0.4.0`, `v1.0.0`)
+5. ✅ Creates GitHub release with changelog
+6. ✅ Supports manual version overrides
+
+### Commit Message Conventions
+
+The workflow analyzes your commit messages to determine the version bump:
+
+- **`feat:` or `feature:`** → MINOR bump (`0.3.0` → `0.4.0`)
+- **`fix:` or `bugfix:`** → PATCH bump (`0.3.0` → `0.3.1`)
+- **`BREAKING:` or `major:`** → MAJOR bump (`0.3.0` → `1.0.0`)
+- **Other types** → PATCH bump (default)
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed commit message guidelines.
 
 ## How to Release a New Version
 
-### Step 1: Update the Version
+### Automatic Version Bumping (Recommended)
 
-Edit `cmd/zap/main.go` and change the version:
+Just commit your changes with the appropriate prefix:
+
+**For a new feature (MINOR bump):**
+```bash
+git commit -m "feat: add new command"
+git push
+# Automatically bumps: 0.3.0 → 0.4.0
+```
+
+**For a bug fix (PATCH bump):**
+```bash
+git commit -m "fix: resolve port scanning issue"
+git push
+# Automatically bumps: 0.3.0 → 0.3.1
+```
+
+**For a breaking change (MAJOR bump):**
+```bash
+git commit -m "BREAKING: change API structure"
+git push
+# Automatically bumps: 0.3.0 → 1.0.0
+```
+
+The workflow will:
+- Detect `.go` file changes
+- Analyze commit messages
+- Auto-bump version appropriately
+- Create tag and release
+
+### Manual Version Override
+
+If you need to set a specific version, edit `cmd/zap/main.go`:
 
 ```go
-const version = "0.4.0"  // or whatever version you want
+const version = "0.5.0"  // Your desired version
 ```
 
-### Step 2: Commit and Push
-
+Then commit and push:
 ```bash
-git add cmd/zap/main.go
-git commit -m "Bump version to 0.4.0"
-git push origin main
+git commit -m "chore: bump version to 0.5.0"
+git push
 ```
 
-### Step 3: Automation Takes Over
-
-The GitHub Actions workflow will:
-- Detect the version change
-- Validate the format (must be MAJOR.MINOR.PATCH)
-- Check if the tag already exists (prevents duplicates)
-- Create the tag `v0.4.0`
-- Create a GitHub release with changelog
-- Make it available for `go install github.com/hugoev/zap/cmd/zap@v0.4.0`
-
-**That's it!** No manual tagging needed.
+**Manual version changes take precedence** - the workflow will use your version instead of auto-bumping.
 
 ### Manual Tagging (Fallback)
 
