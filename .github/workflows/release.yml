@@ -176,18 +176,48 @@ jobs:
           NEW_VERSION="${{ steps.bump.outputs.new_version }}"
           
           # Update the version constant in internal/version/version.go
+          # Use extended regex pattern that handles whitespace variations
           if [[ "$OSTYPE" == "darwin"* ]]; then
-            # macOS
-            sed -i '' "s/const Version = \"${OLD_VERSION}\"/const Version = \"${NEW_VERSION}\"/" internal/version/version.go
+            # macOS - use extended regex
+            sed -i '' -E "s/(const Version = \")${OLD_VERSION}(\")/\1${NEW_VERSION}\2/" internal/version/version.go
           else
-            # Linux
-            sed -i "s/const Version = \"${OLD_VERSION}\"/const Version = \"${NEW_VERSION}\"/" internal/version/version.go
+            # Linux - use extended regex
+            sed -i -E "s/(const Version = \")${OLD_VERSION}(\")/\1${NEW_VERSION}\2/" internal/version/version.go
           fi
           
-          # Verify the update
-          UPDATED_VERSION=$(grep -E '^\s*const Version = ' internal/version/version.go | sed -E "s/^\s*const Version = \"([^\"]+)\"/\1/")
-          if [ "$UPDATED_VERSION" != "$NEW_VERSION" ]; then
-            echo "❌ Version update failed! Expected: $NEW_VERSION, Got: $UPDATED_VERSION"
+          # Verify the update with retry logic for robustness
+          MAX_VERIFY_ATTEMPTS=3
+          VERIFY_ATTEMPT=0
+          VERIFY_SUCCESS=false
+          
+          while [ $VERIFY_ATTEMPT -lt $MAX_VERIFY_ATTEMPTS ]; do
+            UPDATED_VERSION=$(grep -E '^\s*const Version = ' internal/version/version.go | sed -E "s/^\s*const Version = \"([^\"]+)\"/\1/")
+            if [ "$UPDATED_VERSION" = "$NEW_VERSION" ]; then
+              VERIFY_SUCCESS=true
+              break
+            fi
+            VERIFY_ATTEMPT=$((VERIFY_ATTEMPT + 1))
+            if [ $VERIFY_ATTEMPT -lt $MAX_VERIFY_ATTEMPTS ]; then
+              echo "⚠️  Verification attempt $VERIFY_ATTEMPT failed, retrying update..."
+              sleep 0.5
+              # Retry with more aggressive pattern (match any version)
+              if [[ "$OSTYPE" == "darwin"* ]]; then
+                sed -i '' -E "s/(const Version = \")[^\"]+(\")/\1${NEW_VERSION}\2/" internal/version/version.go
+              else
+                sed -i -E "s/(const Version = \")[^\"]+(\")/\1${NEW_VERSION}\2/" internal/version/version.go
+              fi
+            fi
+          done
+          
+          # Final verification with detailed error reporting
+          if [ "$VERIFY_SUCCESS" = false ]; then
+            FINAL_VERSION=$(grep -E '^\s*const Version = ' internal/version/version.go | sed -E "s/^\s*const Version = \"([^\"]+)\"/\1/")
+            echo "❌ Version update failed after $MAX_VERIFY_ATTEMPTS attempts!"
+            echo "   Expected: $NEW_VERSION"
+            echo "   Got: $FINAL_VERSION"
+            echo "   Old version: $OLD_VERSION"
+            echo "   File contents:"
+            cat internal/version/version.go
             exit 1
           fi
           
