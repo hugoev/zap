@@ -562,23 +562,28 @@ func handleUpdate() {
 	// First try to get the latest tag
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
-
+	
 	tagCmd := exec.CommandContext(ctx2, "git", "ls-remote", "--tags", "--sort=-v:refname", "https://github.com/hugoev/zap.git", "v*")
 	tagOutput, tagErr := tagCmd.Output()
-
+	
 	var installTarget string
 	if tagErr == nil && len(tagOutput) > 0 {
 		// Parse the latest tag from output
 		lines := strings.Split(strings.TrimSpace(string(tagOutput)), "\n")
 		if len(lines) > 0 {
-			// Extract tag name from line like "refs/tags/v0.3.0"
+			// Extract tag name from line like "refs/tags/v0.3.0" or "refs/tags/v0.3.0^{}"
 			parts := strings.Fields(lines[0])
 			if len(parts) > 0 {
 				tagRef := parts[len(parts)-1]
 				if strings.HasPrefix(tagRef, "refs/tags/") {
 					latestTag := strings.TrimPrefix(tagRef, "refs/tags/")
-					installTarget = fmt.Sprintf("github.com/hugoev/zap/cmd/zap@%s", latestTag)
-					log.VerboseLog("found latest tag: %s", latestTag)
+					// Remove ^{} suffix if present (dereferenced tag pointer)
+					latestTag = strings.TrimSuffix(latestTag, "^{}")
+					// Validate it's a proper version tag
+					if strings.HasPrefix(latestTag, "v") && len(latestTag) > 1 {
+						installTarget = fmt.Sprintf("github.com/hugoev/zap/cmd/zap@%s", latestTag)
+						log.VerboseLog("found latest tag: %s", latestTag)
+					}
 				}
 			}
 		}
