@@ -134,4 +134,3 @@ Optional flags:
 - No aggressive memory/process sweeping
 - No GUI or daemon mode (CLI-first design)
 - No assumption of specific frontend or backend tooling
-# zap

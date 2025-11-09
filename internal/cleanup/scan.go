@@ -30,7 +30,7 @@ var cleanupPatterns = []string{
 	".output",
 }
 
-func ScanDirectories(rootPath string, shouldCleanup func(path string, modTime time.Time) bool) ([]DirectoryInfo, error) {
+func ScanDirectories(rootPath string, shouldCleanup func(path string, modTime time.Time) bool, progressCallback func(string)) ([]DirectoryInfo, error) {
 	var directories []DirectoryInfo
 
 	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
@@ -40,6 +40,11 @@ func ScanDirectories(rootPath string, shouldCleanup func(path string, modTime ti
 
 		if !info.IsDir() {
 			return nil
+		}
+
+		// Report progress
+		if progressCallback != nil {
+			progressCallback(path)
 		}
 
 		// Check if this directory matches a cleanup pattern

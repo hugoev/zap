@@ -5,7 +5,25 @@ import (
 	"os"
 
 	"github.com/fatih/color"
+	"github.com/mattn/go-colorable"
+	"github.com/mattn/go-isatty"
 )
+
+var (
+	// Use colorable output to ensure colors work on all platforms
+	colorableOut = colorable.NewColorable(os.Stdout)
+)
+
+func init() {
+	// Enable colors if stdout is a TTY (terminal)
+	// The color library disables colors by default when not a TTY
+	if isatty.IsTerminal(os.Stdout.Fd()) {
+		color.NoColor = false
+	} else {
+		// Even if not a TTY, try to enable colors (for CI/CD that supports it)
+		color.NoColor = false
+	}
+}
 
 type LogLevel string
 
@@ -18,6 +36,8 @@ const (
 	DELETE LogLevel = "DELETE"
 	OK     LogLevel = "OK"
 	FAIL   LogLevel = "FAIL"
+	INFO   LogLevel = "INFO"
+	STATS  LogLevel = "STATS"
 )
 
 var (
@@ -29,6 +49,8 @@ var (
 	deleteColor = color.New(color.FgRed)
 	okColor     = color.New(color.FgGreen)
 	failColor   = color.New(color.FgRed)
+	infoColor   = color.New(color.FgWhite)
+	statsColor  = color.New(color.FgCyan, color.Bold)
 )
 
 func Log(level LogLevel, message string, args ...interface{}) {
@@ -50,10 +72,26 @@ func Log(level LogLevel, message string, args ...interface{}) {
 		c = okColor
 	case FAIL:
 		c = failColor
+	case INFO:
+		c = infoColor
+	case STATS:
+		c = statsColor
 	default:
 		c = color.New()
 	}
 
 	formatted := fmt.Sprintf(message, args...)
-	fmt.Fprintf(os.Stdout, "%-8s %s\n", c.Sprint(string(level)), formatted)
+
+	// Use Fprint to write directly to colorable output
+	// This ensures colors work properly
+	fmt.Fprint(colorableOut, c.Sprint(string(level)))
+	fmt.Fprintf(colorableOut, " %s\n", formatted)
+}
+
+var Verbose bool = false
+
+func VerboseLog(message string, args ...interface{}) {
+	if Verbose {
+		Log(INFO, message, args...)
+	}
 }

@@ -35,6 +35,10 @@ func main() {
 	flags := parseFlags(args)
 	yes := flags["yes"] || flags["y"]
 	dryRun := flags["dry-run"]
+	verbose := flags["verbose"] || flags["v"]
+
+	// Set verbose mode globally
+	log.Verbose = verbose
 
 	switch command {
 	case "ports":
@@ -72,12 +76,14 @@ func printUsage() {
 	fmt.Println("  version   Display version and build metadata")
 	fmt.Println()
 	fmt.Println("Flags:")
-	fmt.Println("  --yes, -y     Execute without confirmation where safe")
-	fmt.Println("  --dry-run     Show planned actions without making changes")
+	fmt.Println("  --yes, -y        Execute without confirmation where safe")
+	fmt.Println("  --dry-run        Show planned actions without making changes")
+	fmt.Println("  --verbose, -v    Show detailed progress and information")
 }
 
 func handlePorts(cfg *config.Config, yes, dryRun bool) {
 	log.Log(log.SCAN, "checking commonly used development ports")
+	log.VerboseLog("scanning ports: %v", getCommonPorts())
 
 	processes, err := ports.ScanPorts()
 	if err != nil {
@@ -90,6 +96,8 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 		return
 	}
 
+	log.VerboseLog("found %d processes on scanned ports", len(processes))
+
 	var safeToKill []ports.ProcessInfo
 	var needsConfirmation []ports.ProcessInfo
 	var skipped []ports.ProcessInfo
@@ -101,17 +109,31 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 			continue
 		}
 
+		// Format process info
+		runtimeStr := formatRuntime(proc.Runtime)
+		procInfo := fmt.Sprintf(":%d PID %d (%s) [%s]", proc.Port, proc.PID, proc.Name, runtimeStr)
+		if log.Verbose {
+			cmdPreview := truncateString(proc.Cmd, 60)
+			procInfo += fmt.Sprintf(" - %s", cmdPreview)
+			if proc.WorkingDir != "" {
+				procInfo += fmt.Sprintf(" [%s]", truncateString(proc.WorkingDir, 40))
+			}
+		}
+
 		if ports.IsInfrastructureProcess(proc) {
 			needsConfirmation = append(needsConfirmation, proc)
-			log.Log(log.FOUND, ":%d PID %d (%s)", proc.Port, proc.PID, proc.Name)
+			log.Log(log.FOUND, procInfo)
 		} else if ports.IsSafeDevServer(proc) {
 			safeToKill = append(safeToKill, proc)
-			log.Log(log.FOUND, ":%d PID %d (%s)", proc.Port, proc.PID, proc.Name)
+			log.Log(log.FOUND, procInfo)
 		} else {
 			needsConfirmation = append(needsConfirmation, proc)
-			log.Log(log.FOUND, ":%d PID %d (%s)", proc.Port, proc.PID, proc.Name)
+			log.Log(log.FOUND, procInfo)
 		}
 	}
+
+	// Track actual kills
+	actualKilledCount := 0
 
 	// Kill safe processes
 	if len(safeToKill) > 0 {
@@ -122,7 +144,7 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 
 		shouldKill := yes || cfg.AutoConfirmSafeActions
 		if !shouldKill && !dryRun {
-			log.Log(log.ACTION, "terminate processes %v? (y/N): ", pids)
+			log.Log(log.ACTION, "terminate %d safe dev server process(es) %v? (y/N): ", len(safeToKill), pids)
 			shouldKill = confirm()
 		}
 
@@ -131,12 +153,14 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 				for _, proc := range safeToKill {
 					log.Log(log.STOP, "PID %d (would terminate)", proc.PID)
 				}
+				actualKilledCount += len(safeToKill)
 			} else {
 				for _, proc := range safeToKill {
 					if err := ports.KillProcess(proc.PID); err != nil {
 						log.Log(log.FAIL, "Failed to kill PID %d: %v", proc.PID, err)
 					} else {
 						log.Log(log.STOP, "PID %d", proc.PID)
+						actualKilledCount++
 					}
 				}
 			}
@@ -152,7 +176,7 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 
 		shouldKill := yes
 		if !shouldKill && !dryRun {
-			log.Log(log.ACTION, "terminate infrastructure processes %v? (y/N): ", pids)
+			log.Log(log.ACTION, "terminate %d infrastructure/unknown process(es) %v? (y/N): ", len(needsConfirmation), pids)
 			shouldKill = confirm()
 		}
 
@@ -161,20 +185,37 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 				for _, proc := range needsConfirmation {
 					log.Log(log.STOP, "PID %d (would terminate)", proc.PID)
 				}
+				actualKilledCount += len(needsConfirmation)
 			} else {
 				for _, proc := range needsConfirmation {
 					if err := ports.KillProcess(proc.PID); err != nil {
 						log.Log(log.FAIL, "Failed to kill PID %d: %v", proc.PID, err)
 					} else {
 						log.Log(log.STOP, "PID %d", proc.PID)
+						actualKilledCount++
 					}
 				}
 			}
 		}
 	}
 
-	if !dryRun {
-		log.Log(log.OK, "ports freed")
+	// Summary statistics - only show success if processes were actually killed
+	if actualKilledCount > 0 {
+		if dryRun {
+			log.Log(log.STATS, "would terminate %d process(es), %d skipped", actualKilledCount, len(skipped))
+		} else {
+			log.Log(log.STATS, "terminated %d process(es), %d skipped", actualKilledCount, len(skipped))
+		}
+	} else {
+		// No processes were killed
+		totalFound := len(safeToKill) + len(needsConfirmation) + len(skipped)
+		if totalFound == 0 {
+			log.Log(log.OK, "no processes found on common development ports")
+		} else if len(skipped) > 0 && len(safeToKill)+len(needsConfirmation) == 0 {
+			log.Log(log.OK, "no processes to terminate, %d protected", len(skipped))
+		} else {
+			log.Log(log.OK, "no processes terminated")
+		}
 	}
 }
 
@@ -195,17 +236,31 @@ func handleCleanup(cfg *config.Config, yes, dryRun bool) {
 	}
 
 	var allDirs []cleanup.DirectoryInfo
+	scannedCount := 0
+
 	for _, scanPath := range scanPaths {
 		if _, err := os.Stat(scanPath); os.IsNotExist(err) {
+			log.VerboseLog("skipping non-existent path: %s", scanPath)
 			continue
 		}
 
-		dirs, err := cleanup.ScanDirectories(scanPath, cfg.ShouldCleanup)
+		log.VerboseLog("scanning: %s", scanPath)
+		progressCallback := func(path string) {
+			if log.Verbose {
+				log.VerboseLog("  checking: %s", path)
+			}
+		}
+
+		dirs, err := cleanup.ScanDirectories(scanPath, cfg.ShouldCleanup, progressCallback)
 		if err != nil {
+			log.VerboseLog("error scanning %s: %v", scanPath, err)
 			continue
 		}
 		allDirs = append(allDirs, dirs...)
+		scannedCount++
 	}
+
+	log.VerboseLog("scanned %d directory path(s)", scannedCount)
 
 	if len(allDirs) == 0 {
 		log.Log(log.OK, "no stale directories found")
@@ -214,9 +269,21 @@ func handleCleanup(cfg *config.Config, yes, dryRun bool) {
 
 	// Display found directories
 	totalSize := cleanup.GetTotalSize(allDirs)
+
+	// Sort by size (largest first) for better visibility
+	sortedDirs := make([]cleanup.DirectoryInfo, len(allDirs))
+	copy(sortedDirs, allDirs)
+	for i := 0; i < len(sortedDirs)-1; i++ {
+		for j := i + 1; j < len(sortedDirs); j++ {
+			if sortedDirs[i].Size < sortedDirs[j].Size {
+				sortedDirs[i], sortedDirs[j] = sortedDirs[j], sortedDirs[i]
+			}
+		}
+	}
+
 	log.Log(log.FOUND, "found %d directories (%s total)", len(allDirs), cleanup.FormatSize(totalSize))
 
-	for _, dir := range allDirs {
+	for _, dir := range sortedDirs {
 		age := int(time.Since(dir.ModTime).Hours() / 24)
 		log.Log(log.FOUND, "%s (%s, %d days old)", dir.Path, cleanup.FormatSize(dir.Size), age)
 	}
@@ -229,18 +296,23 @@ func handleCleanup(cfg *config.Config, yes, dryRun bool) {
 
 	if shouldDelete {
 		if dryRun {
-			for _, dir := range allDirs {
+			log.Log(log.INFO, "would delete %d directories (%s total)", len(allDirs), cleanup.FormatSize(totalSize))
+			for _, dir := range sortedDirs {
 				log.Log(log.DELETE, "%s (would delete)", dir.Path)
 			}
 		} else {
+			deletedCount := 0
+			freedSize := int64(0)
 			for _, dir := range allDirs {
 				if err := cleanup.DeleteDirectory(dir.Path); err != nil {
 					log.Log(log.FAIL, "Failed to delete %s: %v", dir.Path, err)
 				} else {
 					log.Log(log.DELETE, "%s", dir.Path)
+					deletedCount++
+					freedSize += dir.Size
 				}
 			}
-			log.Log(log.OK, "cleanup complete, freed %s", cleanup.FormatSize(totalSize))
+			log.Log(log.STATS, "deleted %d directories, freed %s", deletedCount, cleanup.FormatSize(freedSize))
 		}
 	}
 }
@@ -253,4 +325,37 @@ func confirm() bool {
 	}
 	response = strings.TrimSpace(strings.ToLower(response))
 	return response == "y" || response == "yes"
+}
+
+func formatRuntime(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	} else if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	} else if d < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	} else {
+		days := int(d.Hours() / 24)
+		return fmt.Sprintf("%dd", days)
+	}
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+func getCommonPorts() []int {
+	return []int{
+		3000, 3001, 3002, 3003,
+		5173, 5174, 5175,
+		8000, 8001, 8080, 8081,
+		4000, 4001,
+		5000, 5001,
+		4200,
+		9000, 9001,
+		7000, 7001,
+	}
 }

@@ -6,24 +6,29 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type ProcessInfo struct {
-	PID  int
-	Port int
-	Name string
-	Cmd  string
+	PID        int
+	Port       int
+	Name       string
+	Cmd        string
+	User       string
+	StartTime  time.Time
+	Runtime    time.Duration
+	WorkingDir string
 }
 
 var commonDevPorts = []int{
 	3000, 3001, 3002, 3003, // Node.js, React
-	5173, 5174, 5175,       // Vite
+	5173, 5174, 5175, // Vite
 	8000, 8001, 8080, 8081, // Python, Go, general
-	4000, 4001,             // SvelteKit
-	5000, 5001,             // Flask
-	4200,                   // Angular
-	9000, 9001,             // Play framework
-	7000, 7001,             // Phoenix
+	4000, 4001, // SvelteKit
+	5000, 5001, // Flask
+	4200,       // Angular
+	9000, 9001, // Play framework
+	7000, 7001, // Phoenix
 }
 
 func ScanPorts() ([]ProcessInfo, error) {
@@ -73,26 +78,93 @@ func getProcessesOnPort(port int) ([]ProcessInfo, error) {
 		}
 
 		cmdName := fields[0]
-		cmdLine := getProcessCommand(pid)
+		procInfo := getProcessDetails(pid)
 
 		processes = append(processes, ProcessInfo{
-			PID:  pid,
-			Port: port,
-			Name: cmdName,
-			Cmd:  cmdLine,
+			PID:        pid,
+			Port:       port,
+			Name:       cmdName,
+			Cmd:        procInfo.Cmd,
+			User:       procInfo.User,
+			StartTime:  procInfo.StartTime,
+			Runtime:    procInfo.Runtime,
+			WorkingDir: procInfo.WorkingDir,
 		})
 	}
 
 	return processes, nil
 }
 
-func getProcessCommand(pid int) string {
+type processDetails struct {
+	Cmd        string
+	User       string
+	StartTime  time.Time
+	Runtime    time.Duration
+	WorkingDir string
+}
+
+func getProcessDetails(pid int) processDetails {
+	details := processDetails{}
+
+	// Get command line (required, fail silently if can't get it)
 	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=")
 	output, err := cmd.Output()
-	if err != nil {
-		return ""
+	if err == nil {
+		details.Cmd = strings.TrimSpace(string(output))
+	} else {
+		// Fallback: just use process name
+		details.Cmd = ""
 	}
-	return strings.TrimSpace(string(output))
+
+	// Get user (optional, continue if fails)
+	cmd = exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "user=")
+	output, err = cmd.Output()
+	if err == nil {
+		details.User = strings.TrimSpace(string(output))
+	}
+
+	// Get start time and calculate runtime (optional)
+	cmd = exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=")
+	output, err = cmd.Output()
+	if err == nil {
+		startStr := strings.TrimSpace(string(output))
+		if startStr != "" {
+			if t, err := parseProcessStartTime(startStr); err == nil {
+				details.StartTime = t
+				details.Runtime = time.Since(t)
+			}
+		}
+	}
+
+	// Get working directory (optional, continue if fails)
+	cmd = exec.Command("lsof", "-p", strconv.Itoa(pid), "-a", "-d", "cwd", "-Fn")
+	output, err = cmd.Output()
+	if err == nil && len(output) > 0 {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "n") {
+				details.WorkingDir = strings.TrimPrefix(line, "n")
+				break
+			}
+		}
+	}
+
+	return details
+}
+
+func parseProcessStartTime(startStr string) (time.Time, error) {
+	// ps lstart format: "Mon Jan 2 15:04:05 2006"
+	layouts := []string{
+		"Mon Jan 2 15:04:05 2006",
+		"Mon Jan  2 15:04:05 2006",
+	}
+
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, startStr); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unable to parse time: %s", startStr)
 }
 
 func IsPortInUse(port int) bool {
@@ -110,8 +182,7 @@ func IsSafeDevServer(proc ProcessInfo) bool {
 	nameLower := strings.ToLower(proc.Name)
 
 	// Node.js dev servers
-	if strings.Contains(cmdLower, "node") && (
-		strings.Contains(cmdLower, "vite") ||
+	if strings.Contains(cmdLower, "node") && (strings.Contains(cmdLower, "vite") ||
 		strings.Contains(cmdLower, "next") ||
 		strings.Contains(cmdLower, "react") ||
 		strings.Contains(cmdLower, "webpack") ||
@@ -127,8 +198,7 @@ func IsSafeDevServer(proc ProcessInfo) bool {
 	}
 
 	// Python dev servers
-	if strings.Contains(cmdLower, "python") && (
-		strings.Contains(cmdLower, "flask") ||
+	if strings.Contains(cmdLower, "python") && (strings.Contains(cmdLower, "flask") ||
 		strings.Contains(cmdLower, "django") ||
 		strings.Contains(cmdLower, "uvicorn") ||
 		strings.Contains(cmdLower, "gunicorn") ||
@@ -137,8 +207,7 @@ func IsSafeDevServer(proc ProcessInfo) bool {
 	}
 
 	// Go dev servers
-	if strings.Contains(cmdLower, "go") && (
-		strings.Contains(cmdLower, "run") ||
+	if strings.Contains(cmdLower, "go") && (strings.Contains(cmdLower, "run") ||
 		strings.Contains(cmdLower, "air")) {
 		return true
 	}
@@ -186,4 +255,3 @@ func IsInfrastructureProcess(proc ProcessInfo) bool {
 
 	return false
 }
-
