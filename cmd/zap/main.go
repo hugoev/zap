@@ -506,8 +506,10 @@ func handleUpdate() {
 
 	// Check the installed binary's modification time to see if it was recently updated
 	var originalModTime time.Time
+	var originalZapPath string
 	zapPath, pathErr := exec.LookPath("zap")
 	if pathErr == nil {
+		originalZapPath = zapPath
 		if info, statErr := os.Stat(zapPath); statErr == nil {
 			originalModTime = info.ModTime()
 			// If binary was modified in the last minute, assume it's already up to date
@@ -516,6 +518,29 @@ func handleUpdate() {
 				log.VerboseLog("binary was recently updated")
 				return
 			}
+		}
+	}
+
+	// Determine where go install will put the binary
+	goBinPath := os.Getenv("GOBIN")
+	if goBinPath == "" {
+		gopath := os.Getenv("GOPATH")
+		if gopath == "" {
+			homeDir, _ := os.UserHomeDir()
+			goBinPath = filepath.Join(homeDir, "go", "bin")
+		} else {
+			goBinPath = filepath.Join(gopath, "bin")
+		}
+	}
+	expectedZapPath := filepath.Join(goBinPath, "zap")
+
+	// Warn if current binary is not in the Go bin directory
+	if originalZapPath != "" && originalZapPath != expectedZapPath {
+		log.VerboseLog("current binary at: %s", originalZapPath)
+		log.VerboseLog("will install to: %s", expectedZapPath)
+		if !strings.Contains(os.Getenv("PATH"), goBinPath) {
+			log.Log(log.INFO, "warning: %s is not in your PATH", goBinPath)
+			log.Log(log.INFO, "add it to your PATH or the update won't be found")
 		}
 	}
 
@@ -537,10 +562,10 @@ func handleUpdate() {
 	// First try to get the latest tag
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
-	
+
 	tagCmd := exec.CommandContext(ctx2, "git", "ls-remote", "--tags", "--sort=-v:refname", "https://github.com/hugoev/zap.git", "v*")
 	tagOutput, tagErr := tagCmd.Output()
-	
+
 	var installTarget string
 	if tagErr == nil && len(tagOutput) > 0 {
 		// Parse the latest tag from output
@@ -558,23 +583,23 @@ func handleUpdate() {
 			}
 		}
 	}
-	
+
 	// Fallback to @main if we can't get tags
 	if installTarget == "" {
 		installTarget = "github.com/hugoev/zap/cmd/zap@main"
 		log.VerboseLog("using main branch as fallback")
 	}
-	
+
 	// Install latest version
 	log.Log(log.INFO, "downloading and installing latest version...")
-	
+
 	updateCtx, updateCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer updateCancel()
-	
+
 	cmd = exec.CommandContext(updateCtx, "go", "install", installTarget)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	
+
 	if err := cmd.Run(); err != nil {
 		if updateCtx.Err() == context.DeadlineExceeded {
 			log.Log(log.FAIL, "update timed out after 60 seconds")
@@ -585,22 +610,40 @@ func handleUpdate() {
 		log.Log(log.INFO, "  go install github.com/hugoev/zap/cmd/zap@latest")
 		os.Exit(1)
 	}
-	
+
 	// Verify the update by checking the new binary's version
 	// Give filesystem a moment to sync
 	time.Sleep(200 * time.Millisecond)
-	
+
+	// Check the installed binary (in Go bin directory)
+	var installedZapPath string
+	if _, err := os.Stat(expectedZapPath); err == nil {
+		installedZapPath = expectedZapPath
+	} else if pathErr == nil {
+		// Fallback to checking the original path
+		installedZapPath = originalZapPath
+	}
+
 	// Check if binary was updated by comparing modification times
-	if pathErr == nil && !originalModTime.IsZero() {
-		if newInfo, err := os.Stat(zapPath); err == nil {
-			if newInfo.ModTime().After(originalModTime) {
+	if installedZapPath != "" {
+		if newInfo, err := os.Stat(installedZapPath); err == nil {
+			if !originalModTime.IsZero() && newInfo.ModTime().After(originalModTime) {
 				// Binary was updated, verify by running it
-				verifyCmd := exec.Command(zapPath, "version")
+				verifyCmd := exec.Command(installedZapPath, "version")
 				verifyOutput, verifyErr := verifyCmd.Output()
 				if verifyErr == nil {
 					outputStr := strings.TrimSpace(string(verifyOutput))
 					log.Log(log.OK, "update complete!")
 					log.Log(log.INFO, "new version: %s", outputStr)
+
+					// Check if PATH needs updating
+					if installedZapPath == expectedZapPath && originalZapPath != expectedZapPath {
+						log.Log(log.INFO, "updated binary installed to: %s", expectedZapPath)
+						if !strings.Contains(os.Getenv("PATH"), goBinPath) {
+							log.Log(log.INFO, "add %s to your PATH to use the updated version", goBinPath)
+						}
+					}
+
 					if strings.Contains(outputStr, currentVersion) {
 						log.Log(log.INFO, "note: version may be cached, restart your terminal or run: hash -r")
 					}
@@ -608,15 +651,23 @@ func handleUpdate() {
 					log.Log(log.OK, "update complete!")
 					log.Log(log.INFO, "run 'zap version' to verify the new version")
 				}
-			} else {
+			} else if !originalModTime.IsZero() {
 				log.Log(log.OK, "already up to date (version %s)", currentVersion)
+			} else {
+				log.Log(log.OK, "update complete!")
+				log.Log(log.INFO, "run 'zap version' to verify the new version")
 			}
 			return
 		}
 	}
-	
+
 	// If we can't verify, still report success but warn user
 	log.Log(log.OK, "update complete!")
 	log.Log(log.INFO, "run 'zap version' to verify the new version")
-	log.Log(log.INFO, "if version hasn't changed, try: hash -r  (or restart your terminal)")
+	if originalZapPath != "" && originalZapPath != expectedZapPath {
+		log.Log(log.INFO, "note: binary installed to %s (current: %s)", expectedZapPath, originalZapPath)
+		log.Log(log.INFO, "if version hasn't changed, ensure %s is in your PATH", goBinPath)
+	} else {
+		log.Log(log.INFO, "if version hasn't changed, try: hash -r  (or restart your terminal)")
+	}
 }
