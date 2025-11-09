@@ -25,29 +25,19 @@ jobs:
       - name: Download dependencies
         run: go mod download
       
-      - name: Build
-        run: go build ./cmd/zap
-      
-      - name: Validate version format
+      - name: Build with version info
         run: |
-          # Extract version from internal/version/version.go
-          VERSION=$(grep -E '^\s*const Version = ' internal/version/version.go | sed -E "s/^\s*const Version = \"([^\"]+)\"/\1/")
-          if [ -z "$VERSION" ]; then
-            echo "❌ Could not extract version from internal/version/version.go"
-            exit 1
-          fi
+          # Build with version from git tags (if available) or use "dev"
+          VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
+          COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           
-          # Normalize: if only MAJOR.MINOR, add .0 for PATCH
-          if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+$'; then
-            VERSION="${VERSION}.0"
-            echo "ℹ️  Normalized version to ${VERSION} (added .0 for patch)"
-          fi
+          go build -ldflags "-X github.com/hugoev/zap/internal/version.Version=${VERSION} -X github.com/hugoev/zap/internal/version.Commit=${COMMIT} -X github.com/hugoev/zap/internal/version.Date=${DATE}" ./cmd/zap
           
-          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "❌ Invalid version format: $VERSION"
-            echo "   Expected: MAJOR.MINOR.PATCH (e.g., 4.1.0) or MAJOR.MINOR (e.g., 4.1 → 4.1.0)"
-            exit 1
-          fi
-          
-          echo "✅ Version format valid: $VERSION"
+          echo "✅ Built with version: ${VERSION}"
+      
+      - name: Verify version works
+        run: |
+          # Test that version command works
+          ./zap version || go run -ldflags "-X github.com/hugoev/zap/internal/version.Version=dev" ./cmd/zap version
 

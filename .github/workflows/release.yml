@@ -22,9 +22,17 @@ jobs:
       - name: Detect changed files
         id: changes
         run: |
-          # Check if any .go files changed (excluding version.go changes)
-          GO_CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '\.go$' | grep -v '^internal/version/version.go$' | wc -l | tr -d ' ')
-          VERSION_CHANGED=$(git diff HEAD~1 HEAD -- internal/version/version.go | grep -E '^\+.*const Version' || echo "")
+          # Check if any .go files changed
+          GO_CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '\.go$' | wc -l | tr -d ' ')
+          
+          # Check if a new git tag was created (manual version change via tag)
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+          VERSION_CHANGED=""
+          if [ "$LATEST_TAG" != "$PREV_TAG" ] && [ -n "$LATEST_TAG" ]; then
+            VERSION_CHANGED="true"
+            echo "✅ New git tag detected: $LATEST_TAG (manual version change)"
+          fi
           
           if [ "$GO_CHANGED" -gt 0 ]; then
             echo "go=true" >> $GITHUB_OUTPUT
@@ -35,7 +43,6 @@ jobs:
           
           if [ -n "$VERSION_CHANGED" ]; then
             echo "version=true" >> $GITHUB_OUTPUT
-            echo "✅ Version was manually changed"
           else
             echo "version=false" >> $GITHUB_OUTPUT
           fi
@@ -102,19 +109,24 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Extract current version
+      - name: Extract current version from git tags
         id: current
         run: |
-          # Extract version from internal/version/version.go
-          VERSION=$(grep -E '^\s*const Version = ' internal/version/version.go | sed -E "s/^\s*const Version = \"([^\"]+)\"/\1/")
-          if [ -z "$VERSION" ]; then
-            echo "❌ Could not extract version from internal/version/version.go"
-            echo "   Attempting fallback to cmd/zap/main.go..."
-            # Fallback to old location for backwards compatibility
-            VERSION=$(grep -E '^const version = ' cmd/zap/main.go | sed -E "s/^const version = \"([^\"]+)\"/\1/" || echo "")
-            if [ -z "$VERSION" ]; then
-              echo "❌ Could not extract version from either location"
-              exit 1
+          # Get the latest git tag (version source of truth)
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          
+          if [ -z "$LAST_TAG" ]; then
+            # No tags exist yet, start from 0.0.0
+            VERSION="0.0.0"
+            echo "ℹ️  No existing tags found, starting from 0.0.0"
+          else
+            # Extract version from tag (remove 'v' prefix if present)
+            VERSION=$(echo "$LAST_TAG" | sed -E 's/^v//')
+            
+            # Validate it's a proper version
+            if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "⚠️  Last tag $LAST_TAG is not a valid version, starting from 0.0.0"
+              VERSION="0.0.0"
             fi
           fi
           
@@ -130,7 +142,7 @@ jobs:
           fi
           
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "✅ Current version: $VERSION"
+          echo "✅ Current version from git tags: $VERSION"
       
       - name: Bump version based on commit type
         id: bump
@@ -170,69 +182,20 @@ jobs:
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "✅ Bumping version: $OLD_VERSION → $NEW_VERSION"
       
-      - name: Update version in version.go
+      - name: Create git tag for new version
         run: |
-          OLD_VERSION="${{ steps.current.outputs.version }}"
           NEW_VERSION="${{ steps.bump.outputs.new_version }}"
+          TAG="v${NEW_VERSION}"
           
-          # Update the version constant in internal/version/version.go
-          # Use extended regex pattern that handles whitespace variations
-          if [[ "$OSTYPE" == "darwin"* ]]; then
-            # macOS - use extended regex
-            sed -i '' -E "s/(const Version = \")${OLD_VERSION}(\")/\1${NEW_VERSION}\2/" internal/version/version.go
-          else
-            # Linux - use extended regex
-            sed -i -E "s/(const Version = \")${OLD_VERSION}(\")/\1${NEW_VERSION}\2/" internal/version/version.go
-          fi
-          
-          # Verify the update with retry logic for robustness
-          MAX_VERIFY_ATTEMPTS=3
-          VERIFY_ATTEMPT=0
-          VERIFY_SUCCESS=false
-          
-          while [ $VERIFY_ATTEMPT -lt $MAX_VERIFY_ATTEMPTS ]; do
-            UPDATED_VERSION=$(grep -E '^\s*const Version = ' internal/version/version.go | sed -E "s/^\s*const Version = \"([^\"]+)\"/\1/")
-            if [ "$UPDATED_VERSION" = "$NEW_VERSION" ]; then
-              VERIFY_SUCCESS=true
-              break
-            fi
-            VERIFY_ATTEMPT=$((VERIFY_ATTEMPT + 1))
-            if [ $VERIFY_ATTEMPT -lt $MAX_VERIFY_ATTEMPTS ]; then
-              echo "⚠️  Verification attempt $VERIFY_ATTEMPT failed, retrying update..."
-              sleep 0.5
-              # Retry with more aggressive pattern (match any version)
-              if [[ "$OSTYPE" == "darwin"* ]]; then
-                sed -i '' -E "s/(const Version = \")[^\"]+(\")/\1${NEW_VERSION}\2/" internal/version/version.go
-              else
-                sed -i -E "s/(const Version = \")[^\"]+(\")/\1${NEW_VERSION}\2/" internal/version/version.go
-              fi
-            fi
-          done
-          
-          # Final verification with detailed error reporting
-          if [ "$VERIFY_SUCCESS" = false ]; then
-            FINAL_VERSION=$(grep -E '^\s*const Version = ' internal/version/version.go | sed -E "s/^\s*const Version = \"([^\"]+)\"/\1/")
-            echo "❌ Version update failed after $MAX_VERIFY_ATTEMPTS attempts!"
-            echo "   Expected: $NEW_VERSION"
-            echo "   Got: $FINAL_VERSION"
-            echo "   Old version: $OLD_VERSION"
-            echo "   File contents:"
-            cat internal/version/version.go
-            exit 1
-          fi
-          
-          echo "✅ Updated internal/version/version.go: ${OLD_VERSION} → ${NEW_VERSION}"
-      
-      - name: Commit version bump
-        run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          git add internal/version/version.go
-          git commit -m "chore: auto-bump version to ${{ steps.bump.outputs.new_version }}"
-          git push origin main
+          # Create annotated tag
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
           
-          echo "✅ Committed and pushed version bump"
+          echo "✅ Created and pushed tag: ${TAG}"
+          echo "ℹ️  Version is now derived from git tags - no file updates needed"
 
   create-release:
     needs: [detect-changes, bump-version]
@@ -251,22 +214,25 @@ jobs:
       - name: Determine version to release
         id: version
         run: |
-          # If version was auto-bumped, use that. Otherwise, extract from main.go
+          # Version comes from git tags (created by bump-version job or manual)
           if [ -n "${{ needs.bump-version.outputs.new_version }}" ]; then
+            # Auto-bumped version
             VERSION="${{ needs.bump-version.outputs.new_version }}"
             echo "Using auto-bumped version: $VERSION"
           else
-            # Extract from internal/version/version.go
-            VERSION=$(grep -E '^\s*const Version = ' internal/version/version.go | sed -E "s/^\s*const Version = \"([^\"]+)\"/\1/")
-            if [ -z "$VERSION" ]; then
-              echo "❌ Could not extract version from internal/version/version.go"
+            # Manual version change - get from latest tag
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -z "$LATEST_TAG" ]; then
+              echo "❌ No git tags found and no auto-bump occurred"
               exit 1
             fi
-            
-            # Normalize: if only MAJOR.MINOR, add .0 for PATCH
-            if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+$'; then
-              VERSION="${VERSION}.0"
-            fi
+            VERSION=$(echo "$LATEST_TAG" | sed -E 's/^v//')
+            echo "Using version from latest tag: $VERSION"
+          fi
+          
+          # Normalize: if only MAJOR.MINOR, add .0 for PATCH
+          if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+$'; then
+            VERSION="${VERSION}.0"
           fi
           
           # Validate format
@@ -304,20 +270,23 @@ jobs:
           echo "tag=${PREV_TAG}" >> $GITHUB_OUTPUT
           echo "ℹ️  Previous version: ${PREV_TAG}"
 
-      - name: Create Git tag
+      - name: Verify git tag exists
         if: steps.check-tag.outputs.exists == 'false'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TAG="v${VERSION}"
           
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Create annotated tag
-          git tag -a "${TAG}" -m "Release ${TAG}"
-          git push origin "${TAG}"
-          
-          echo "✅ Created and pushed tag: ${TAG}"
+          # Tag should already exist from bump-version job
+          if ! git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "⚠️  Tag ${TAG} not found, creating it now..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG}" -m "Release ${TAG}"
+            git push origin "${TAG}"
+            echo "✅ Created and pushed tag: ${TAG}"
+          else
+            echo "✅ Tag ${TAG} already exists"
+          fi
       
       - name: Generate release notes
         id: release-notes

@@ -31,8 +31,11 @@ zap automatically detects and terminates orphaned development processes, and ide
 git clone https://github.com/hugoev/zap.git
 cd zap
 
-# Install the binary
-go install ./cmd/zap
+# Install the binary (with version from git tags)
+go install -ldflags "-X github.com/hugoev/zap/internal/version.Version=$(git describe --tags --always)" ./cmd/zap
+
+# Or use the Makefile (recommended)
+make install
 
 # Add Go bin to your PATH (if not already there)
 echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zshrc  # or ~/.bashrc for bash

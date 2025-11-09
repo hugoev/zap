@@ -1,23 +1,34 @@
 # Version Management
 
-## Current Version
+## Fully Automated Versioning
 
-The version is defined in `internal/version/version.go`:
+**Versioning is 100% automated - you never need to touch version files!**
 
-```go
-const Version = "0.3.0"
-```
+The version is **automatically derived from git tags** at build time using Go's `-ldflags`. This is the production-grade approach used by major Go projects.
+
+### How It Works
+
+1. **Development builds**: Version shows as `dev` (no git tags needed)
+2. **Release builds**: Version comes from git tags automatically
+3. **No manual updates**: Version is never hardcoded or manually updated
+4. **Always accurate**: Version always matches the git tag
+
+### Version Source
+
+- **Development**: `internal/version/version.go` defaults to `"dev"`
+- **Releases**: Version injected at build time from git tags using `-ldflags`
+- **Build command**: `go build -ldflags "-X github.com/hugoev/zap/internal/version.Version=$(git describe --tags)"`
 
 ## Automated Release Workflow
 
-**Versioning is fully automated!** The workflow uses commit message conventions to automatically determine version bumps:
+**Zero manual work required!** The workflow automatically:
 
 1. ✅ Detects changes to any `.go` file
 2. ✅ Analyzes commit messages to determine bump type (major/minor/patch)
-3. ✅ Auto-bumps version based on commit type
-4. ✅ Creates git tag (e.g., `v0.3.1`, `v0.4.0`, `v1.0.0`)
+3. ✅ Calculates new version based on latest git tag
+4. ✅ Creates git tag automatically (e.g., `v0.3.1`, `v0.4.0`, `v1.0.0`)
 5. ✅ Creates GitHub release with changelog
-6. ✅ Supports manual version overrides
+6. ✅ Version is always derived from tags - no file updates needed
 
 ### Commit Message Conventions
 
@@ -69,28 +80,37 @@ The workflow will:
 
 ### Manual Version Override
 
-If you need to set a specific version, edit `internal/version/version.go`:
-
-```go
-const Version = "0.5.0"  // Your desired version
-```
-
-Then commit and push:
+If you need to set a specific version, create a git tag:
 
 ```bash
-git commit -m "chore: bump version to 0.5.0"
-git push
+git tag -a v0.5.0 -m "Release v0.5.0"
+git push origin v0.5.0
 ```
 
-**Manual version changes take precedence** - the workflow will use your version instead of auto-bumping.
+The version will automatically be derived from this tag in all builds. **No file edits needed!**
 
-### Manual Tagging (Fallback)
+### Building with Version
 
-If you need to create a tag manually (e.g., if automation fails):
+**Development build** (no tags):
 
 ```bash
-git tag -a v0.4.0 -m "Release version 0.4.0"
-git push origin v0.4.0
+go build ./cmd/zap
+# Version will be "dev"
+```
+
+**Release build** (with git tags):
+
+```bash
+go build -ldflags "-X github.com/hugoev/zap/internal/version.Version=$(git describe --tags)" ./cmd/zap
+# Version will be from git tags (e.g., "v0.3.0")
+```
+
+**Using Makefile** (recommended):
+
+```bash
+make build    # Builds with version from git tags
+make install  # Installs with version from git tags
+make version  # Shows current version
 ```
 
 ## Version Numbering
