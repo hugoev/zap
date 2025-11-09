@@ -2,123 +2,148 @@
 
 Developer environment cleanup and port process management tool.
 
-## The Problem
-
-During development, common frustrations include:
-
-- **Port conflicts**: Starting a dev server only to see "port already in use" because an old process is still running
-- **Orphaned processes**: Closing a terminal window doesn't always kill the underlying process, leaving servers running in the background
-- **Disk bloat**: Accumulating gigabytes of `node_modules`, `.venv`, `.cache`, and build artifacts across dozens of projects
-- **Manual cleanup**: Manually hunting down processes and directories wastes time
-
-These interruptions slow down workflows and clutter your system.
-
-## The Solution
-
-zap automatically detects and terminates orphaned development processes, and identifies stale dependency directories for cleanup. It's safe, predictable, and respects your preferences.
-
-## Installation
-
-### Prerequisites
-
-- Go 1.21 or later
-- macOS, Linux, or Windows with WSL
-
-### Install from Source
+## Quick Install
 
 ```bash
-# Clone the repository
-git clone https://github.com/hugoev/zap.git
-cd zap
-
-# Install the binary (with version from git tags)
-go install -ldflags "-X github.com/hugoev/zap/internal/version.Version=$(git describe --tags --always)" ./cmd/zap
-
-# Or use the Makefile (recommended)
-make install
-
-# Add Go bin to your PATH (if not already there)
-echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zshrc  # or ~/.bashrc for bash
-source ~/.zshrc  # or open a new terminal
-
-# Verify installation
-zap version
-```
-
-The binary will be installed to `~/go/bin/zap` (or `$GOPATH/bin/zap` if GOPATH is set).
-
-### Updating
-
-**Method 1: If you cloned the repository**
-
-```bash
-# Navigate to where you cloned zap
-cd ~/path/to/zap  # or wherever you cloned it
-
-# Pull the latest changes
-git pull
-
-# Reinstall the updated version (with version from git tags)
-go install -ldflags "-X github.com/hugoev/zap/internal/version.Version=$(git describe --tags --always)" ./cmd/zap
-
-# Or use Makefile
-make install
-
-# Verify the update
-zap version
-```
-
-**Method 2: Update from anywhere (recommended)**
-
-```bash
-# This will download and install the latest version
+# Install from source (recommended)
 go install github.com/hugoev/zap/cmd/zap@latest
 
-# Verify the update
-zap version
-```
-
-**Method 3: Using the update command (easiest)**
-
-```bash
-# Simply run the update command
+# Or update if already installed
 zap update
-
-# Verify the update
-zap version
 ```
 
-**Check your current version:**
-
-```bash
-zap version
-```
+That's it! The binary will be in `~/go/bin/zap` (add to PATH if needed).
 
 ## Quick Start
 
 ```bash
-# Free up ports
+# Free up ports (interactive)
 zap ports
 
-# Free up ports without prompts
+# Free up ports automatically
 zap ports --yes
 
-# Clean up stale directories
+# Clean up stale dependency folders
 zap cleanup
 
-# See what would be cleaned (dry run)
+# Preview what would be cleaned
 zap cleanup --dry-run
 ```
+
+## What It Does
+
+**Port Management:**
+- Finds processes on common dev ports (3000, 5173, 8000, etc.)
+- Safely terminates orphaned dev servers
+- Protects infrastructure (Postgres, Redis, Docker)
+
+**Workspace Cleanup:**
+- Finds stale `node_modules`, `.venv`, `.cache`, build artifacts
+- Shows size and age
+- Respects recent modifications
+
+## Commands
+
+| Command       | Description |
+|-------------|-------------|
+| `zap ports`   | Scan and free up ports |
+| `zap cleanup` | Remove stale dependency/cache folders |
+| `zap version` | Show version |
+| `zap update`  | Update to latest version |
+
+## Flags
+
+| Flag              | Description |
+|------------------|-------------|
+| `--yes`, `-y`     | Execute without confirmation (safe actions only) |
+| `--dry-run`       | Preview actions without making changes |
+| `--verbose`, `-v` | Show detailed information |
+
+## Example Output
+
+```
+SCAN     checking commonly used development ports
+FOUND    :3000 PID 54321 (node) [5m] - npm start [~/projects/app]
+FOUND    :5173 PID 55222 (vite) [2h] - vite dev [~/projects/site]
+SKIP     :5432 PID 30120 (postgres) protected
+ACTION   terminate 2 safe dev server process(es) [54321, 55222]? (y/N): y
+STOP     PID 54321
+STOP     PID 55222
+STATS    terminated 2 process(es), 1 skipped
+```
+
+## Installation Options
+
+### From Source (Recommended)
+
+```bash
+# Clone and install
+git clone https://github.com/hugoev/zap.git
+cd zap
+make install
+
+# Or manually
+go install -ldflags "-X github.com/hugoev/zap/internal/version.Version=$(git describe --tags --always)" ./cmd/zap
+```
+
+### Update Existing Installation
+
+```bash
+# Easiest way
+zap update
+
+# Or from anywhere
+go install github.com/hugoev/zap/cmd/zap@latest
+```
+
+## Configuration
+
+Configuration is optional and stored at `~/.config/zap/config.json`. Settings update automatically based on your usage.
+
+```json
+{
+  "protected_ports": [5432, 6379],
+  "max_age_days_for_cleanup": 14,
+  "exclude_paths": [],
+  "auto_confirm_safe_actions": false
+}
+```
+
+## Log Levels
+
+| Code   | Meaning |
+|--------|---------|
+| SCAN   | Discovery/search operation |
+| FOUND  | Candidate resource located |
+| SKIP   | Resource intentionally left untouched |
+| ACTION | Confirmation prompt |
+| STOP   | Process terminated |
+| DELETE | Directory removed |
+| OK     | Successful completion |
+| FAIL   | Operation error |
+| INFO   | Detailed information (verbose mode) |
+| STATS  | Summary statistics |
+
+## The Problem
+
+During development, common frustrations include:
+
+- **Port conflicts**: "port already in use" because an old process is still running
+- **Orphaned processes**: Closing a terminal doesn't always kill the underlying process
+- **Disk bloat**: Accumulating gigabytes of `node_modules`, `.venv`, `.cache`, and build artifacts
+- **Manual cleanup**: Wasting time hunting down processes and directories
+
+zap solves these automatically.
 
 ## Features
 
 ### Port Process Management
 
-- Scans common development ports (3000, 5173, 8000, 8080, etc.)
+- Scans common development ports (3000, 3001, 5173, 8000, 8080, etc.)
 - Automatically identifies safe dev servers (Node, Vite, Python, Go, etc.)
 - Prompts before terminating infrastructure (Postgres, Redis, Docker)
 - Respects protected ports list
-- Shows process runtime and details
+- Shows process runtime, command, and working directory
 
 ### Workspace Cleanup
 
@@ -138,69 +163,10 @@ zap cleanup --dry-run
 - **Protected ports**: Never terminated (configurable)
 - **Recent directories**: Skipped automatically
 
-## Usage
+## Requirements
 
-### Commands
-
-| Command       | Description                           |
-| ------------- | ------------------------------------- |
-| `zap ports`   | Scan and free up ports                |
-| `zap cleanup` | Remove stale dependency/cache folders |
-| `zap version` | Display version information           |
-| `zap update`  | Update zap to the latest version      |
-
-### Flags
-
-| Flag              | Description                                 |
-| ----------------- | ------------------------------------------- |
-| `--yes`, `-y`     | Execute without confirmation where safe     |
-| `--dry-run`       | Show planned actions without making changes |
-| `--verbose`, `-v` | Show detailed progress and information      |
-
-### Example Output
-
-```
-SCAN     checking commonly used development ports
-FOUND    :3000 PID 54321 (node) [5m]
-FOUND    :5173 PID 55222 (vite) [2h]
-SKIP     :5432 PID 30120 (postgres) protected
-ACTION   terminate 2 safe dev server process(es) [54321, 55222]? (y/N): y
-STOP     PID 54321
-STOP     PID 55222
-STATS    terminated 2 process(es), 1 skipped
-```
-
-## Configuration
-
-zap works out of the box with sensible defaults. Configuration is optional and stored at `~/.config/zap/config.json`.
-
-```json
-{
-  "protected_ports": [5432, 6379],
-  "max_age_days_for_cleanup": 14,
-  "exclude_paths": [],
-  "auto_confirm_safe_actions": false
-}
-```
-
-Settings update automatically based on your interactions—no manual editing required.
-
-## Log Levels
-
-| Code   | Meaning                               |
-| ------ | ------------------------------------- |
-| SCAN   | Discovery/search operation            |
-| FOUND  | Candidate resource located            |
-| SKIP   | Resource intentionally left untouched |
-| ACTION | Confirmation prompt                   |
-| STOP   | Process terminated                    |
-| DELETE | Directory removed                     |
-| OK     | Successful completion                 |
-| FAIL   | Operation error                       |
-| INFO   | Detailed information (verbose mode)   |
-| STATS  | Summary statistics                    |
-
-Colors are used for clarity (ANSI-compatible) but never required.
+- Go 1.21 or later (for building from source)
+- macOS, Linux, or Windows with WSL
 
 ## License
 
@@ -208,4 +174,4 @@ Colors are used for clarity (ANSI-compatible) but never required.
 
 ## Contributing
 
-[Add contribution guidelines if applicable]
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
