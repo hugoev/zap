@@ -1,0 +1,163 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'cmd/zap/main.go'  # Only trigger when version file changes
+
+jobs:
+  detect-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_exists: ${{ steps.check-tag.outputs.exists }}
+      should_release: ${{ steps.version.outputs.should_release }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for tags
+      
+      - name: Extract version from main.go
+        id: version
+        run: |
+          VERSION=$(grep -E '^const version = ' cmd/zap/main.go | sed -E "s/^const version = \"([^\"]+)\"/\1/")
+          if [ -z "$VERSION" ]; then
+            echo "❌ Could not extract version from cmd/zap/main.go"
+            exit 1
+          fi
+          
+          # Validate semantic version format
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "❌ Invalid version format: $VERSION (expected MAJOR.MINOR.PATCH)"
+            exit 1
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "should_release=true" >> $GITHUB_OUTPUT
+          echo "✅ Found version: $VERSION"
+      
+      - name: Check if tag already exists
+        id: check-tag
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}"
+          
+          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "ℹ️  Tag ${TAG} already exists, skipping release"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "✅ Tag ${TAG} does not exist, will create release"
+          fi
+      
+      - name: Get previous version (for changelog)
+        id: prev-version
+        if: steps.check-tag.outputs.exists == 'false'
+        run: |
+          # Get the last tag
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            PREV_TAG="v0.0.0"
+          fi
+          echo "tag=${PREV_TAG}" >> $GITHUB_OUTPUT
+          echo "ℹ️  Previous version: ${PREV_TAG}"
+
+  create-release:
+    needs: detect-version
+    if: needs.detect-version.outputs.should_release == 'true' && needs.detect-version.outputs.version_exists == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Create Git tag
+        run: |
+          VERSION="${{ needs.detect-version.outputs.version }}"
+          TAG="v${VERSION}"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Create annotated tag
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+          
+          echo "✅ Created and pushed tag: ${TAG}"
+      
+      - name: Generate release notes
+        id: release-notes
+        run: |
+          VERSION="${{ needs.detect-version.outputs.version }}"
+          PREV_TAG="${{ needs.detect-version.outputs.prev-version }}"
+          TAG="v${VERSION}"
+          
+          # Get commits since last tag
+          if [ "$PREV_TAG" != "v0.0.0" ] && git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
+            COMMITS=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          else
+            COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges -20)
+          fi
+          
+          NOTES="## Release ${TAG}
+          
+          ### Changes
+          ${COMMITS}
+          
+          ### Installation
+          
+          \`\`\`bash
+          go install github.com/hugoev/zap/cmd/zap@${TAG}
+          \`\`\`
+          
+          Or update using:
+          
+          \`\`\`bash
+          zap update
+          \`\`\`"
+          
+          # Save to file for multiline support
+          echo "$NOTES" > release_notes.md
+          cat release_notes.md
+      
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ needs.detect-version.outputs.version }}
+          release_name: Release v${{ needs.detect-version.outputs.version }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+      
+      - name: Build and attach binaries (optional)
+        run: |
+          echo "ℹ️  Binaries can be built and attached here if needed"
+          echo "For Go projects, users typically install via 'go install'"
+
+  validate-version:
+    needs: detect-version
+    if: always() && needs.detect-version.outputs.version_exists == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Validate version consistency
+        run: |
+          VERSION="${{ needs.detect-version.outputs.version }}"
+          TAG="v${VERSION}"
+          
+          echo "ℹ️  Version ${VERSION} in code matches existing tag ${TAG}"
+          echo "✅ No release needed - version already tagged"
+
