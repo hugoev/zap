@@ -401,7 +401,8 @@ func handlePorts(cfg *config.Config, yes, dryRun, jsonOutput bool, flagValues ma
 
 		shouldKill := yes || cfg.AutoConfirmSafeActions
 		if !shouldKill && !dryRun {
-			log.Log(log.ACTION, "terminate %d safe dev server process(es) %v? (y/N): ", len(safeToKill), pids)
+			showProcessConfirmation("Safe dev servers", safeToKill)
+			log.Log(log.ACTION, "terminate %d safe dev server process(es)? (y/N): ", len(safeToKill))
 			shouldKill = confirm()
 		}
 
@@ -445,7 +446,8 @@ func handlePorts(cfg *config.Config, yes, dryRun, jsonOutput bool, flagValues ma
 
 		shouldKill := yes
 		if !shouldKill && !dryRun {
-			log.Log(log.ACTION, "terminate %d infrastructure/unknown process(es) %v? (y/N): ", len(needsConfirmation), pids)
+			showProcessConfirmation("Infrastructure/unknown processes", needsConfirmation)
+			log.Log(log.ACTION, "terminate %d infrastructure/unknown process(es)? (y/N): ", len(needsConfirmation))
 			shouldKill = confirm()
 		}
 
@@ -606,7 +608,8 @@ func handleCleanup(cfg *config.Config, yes, dryRun, jsonOutput bool, flagValues 
 
 	shouldDelete := yes
 	if !shouldDelete && !dryRun {
-		log.Log(log.ACTION, "delete these directories? (y/N): ")
+		showDirectoryConfirmation(sortedDirs, totalSize)
+		log.Log(log.ACTION, "delete these %d directories (%s total)? (y/N): ", len(allDirs), cleanup.FormatSize(totalSize))
 		shouldDelete = confirm()
 	}
 
@@ -662,6 +665,40 @@ func confirm() bool {
 	}
 	response = strings.TrimSpace(strings.ToLower(response))
 	return response == "y" || response == "yes"
+}
+
+// showProcessConfirmation displays detailed information about processes before asking for confirmation
+func showProcessConfirmation(category string, processes []ports.ProcessInfo) {
+	fmt.Println()
+	fmt.Printf("  %s (%d):\n", category, len(processes))
+	for i, proc := range processes {
+		runtimeStr := formatRuntime(proc.Runtime)
+		cmdPreview := truncateString(proc.Cmd, 50)
+		dirPreview := truncateString(proc.WorkingDir, 35)
+
+		fmt.Printf("    %d. :%d PID %d (%s) [%s]", i+1, proc.Port, proc.PID, proc.Name, runtimeStr)
+		if cmdPreview != "" {
+			fmt.Printf(" - %s", cmdPreview)
+		}
+		if dirPreview != "" {
+			fmt.Printf(" [%s]", dirPreview)
+		}
+		fmt.Println()
+	}
+	fmt.Println()
+}
+
+// showDirectoryConfirmation displays detailed information about directories before asking for confirmation
+func showDirectoryConfirmation(dirs []cleanup.DirectoryInfo, totalSize int64) {
+	fmt.Println()
+	fmt.Printf("  Directories to delete (%d, %s total):\n", len(dirs), cleanup.FormatSize(totalSize))
+
+	// Show all directories
+	for i, dir := range dirs {
+		age := int(time.Since(dir.ModTime).Hours() / 24)
+		fmt.Printf("    %d. %s (%s, %d days old)\n", i+1, dir.Path, cleanup.FormatSize(dir.Size), age)
+	}
+	fmt.Println()
 }
 
 func formatRuntime(d time.Duration) string {
