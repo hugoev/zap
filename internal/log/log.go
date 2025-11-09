@@ -43,13 +43,13 @@ const (
 var (
 	scanColor   = color.New(color.FgCyan)
 	foundColor  = color.New(color.FgYellow)
-	skipColor   = color.New(color.FgBlue)
+	skipColor    = color.New(color.FgBlue)
 	actionColor = color.New(color.FgMagenta)
 	stopColor   = color.New(color.FgRed)
 	deleteColor = color.New(color.FgRed)
 	okColor     = color.New(color.FgGreen)
 	failColor   = color.New(color.FgRed)
-	infoColor   = color.New(color.FgWhite)
+	infoColor   = color.New(color.FgCyan) // Changed from white to cyan for better visibility
 	statsColor  = color.New(color.FgCyan, color.Bold)
 )
 
