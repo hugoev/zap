@@ -116,6 +116,27 @@ func KillProcessGroup(pid int) error {
 		return fmt.Errorf("process groups not supported on this platform")
 	}
 
+	// Count processes in group to determine appropriate timeout
+	processCount, countErr := countProcessGroupSize(pgid)
+	if countErr != nil {
+		// If we can't count, use default timeout
+		processCount = 1
+	}
+
+	// Adaptive timeout: base timeout + additional time per process
+	// For large process groups (1000+), allow more time
+	// Formula: base 3s + 10ms per process, capped at 30s for very large groups
+	adaptiveTimeout := GracefulTerminationTimeout + time.Duration(processCount)*10*time.Millisecond
+	maxTimeout := 30 * time.Second
+	if adaptiveTimeout > maxTimeout {
+		adaptiveTimeout = maxTimeout
+	}
+	
+	// Minimum timeout of 3 seconds
+	if adaptiveTimeout < GracefulTerminationTimeout {
+		adaptiveTimeout = GracefulTerminationTimeout
+	}
+
 	// Send SIGTERM to entire process group (negative PID means process group)
 	err = unix.Kill(-pgid, syscall.SIGTERM)
 	if err != nil {
@@ -126,8 +147,8 @@ func KillProcessGroup(pid int) error {
 		return fmt.Errorf("failed to signal process group: %w", err)
 	}
 
-	// Wait for graceful termination
-	deadline := time.Now().Add(GracefulTerminationTimeout)
+	// Wait for graceful termination with adaptive timeout
+	deadline := time.Now().Add(adaptiveTimeout)
 	for time.Now().Before(deadline) {
 		if !isProcessGroupRunning(pgid) {
 			return nil // Process group terminated gracefully
@@ -158,6 +179,25 @@ func isProcessGroupRunning(pgid int) bool {
 		return false
 	}
 	return len(strings.TrimSpace(string(output))) > 0
+}
+
+// countProcessGroupSize counts the number of processes in a process group
+func countProcessGroupSize(pgid int) (int, error) {
+	cmd := exec.Command("ps", "-o", "pid=", "-g", strconv.Itoa(pgid))
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, err
+	}
+	
+	// Count non-empty lines (each line is a PID)
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	count := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func KillProcessForce(pid int) error {

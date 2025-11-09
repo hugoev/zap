@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -20,17 +21,39 @@ func DeleteDirectory(path string) error {
 		return fmt.Errorf("path validation failed: %w", err)
 	}
 
+	// Check for network mount disconnection before proceeding
+	if err := checkNetworkMount(path); err != nil {
+		return fmt.Errorf("network mount check failed: %w", err)
+	}
+
 	// Validate path exists before attempting deletion
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // Already deleted, not an error
 		}
+		// Check for network disconnection errors
+		// os.Stat returns *os.PathError, so we need to check the underlying error
+		if pathErr, ok := err.(*os.PathError); ok {
+			if pathErr.Err == syscall.ENOTCONN || pathErr.Err == syscall.EHOSTUNREACH || pathErr.Err == syscall.ETIMEDOUT {
+				return fmt.Errorf("network mount disconnected: %s (cannot access path)", path)
+			}
+		}
 		return fmt.Errorf("cannot access path %s: %w", path, err)
 	}
 
 	if !info.IsDir() {
 		return fmt.Errorf("path is not a directory: %s", path)
+	}
+
+	// Check if path is a mount point (critical safety check)
+	isMount, err := isMountPoint(path)
+	if err != nil {
+		// If we can't determine, err on the side of caution
+		return fmt.Errorf("cannot determine if path is mount point: %w (deletion aborted for safety)", err)
+	}
+	if isMount {
+		return fmt.Errorf("path is a mount point and cannot be deleted: %s (this would unmount the filesystem)", path)
 	}
 
 	// Check disk space before deletion (safety check)
@@ -51,6 +74,18 @@ func DeleteDirectory(path string) error {
 		}
 		
 		lastErr = err
+		
+		// Check for network mount disconnection (not transient, but should be handled)
+		if pathErr, ok := err.(*os.PathError); ok {
+			if pathErr.Err == syscall.ENOTCONN || pathErr.Err == syscall.EHOSTUNREACH || pathErr.Err == syscall.ETIMEDOUT {
+				// Network error - check mount status
+				if checkErr := checkNetworkMount(path); checkErr != nil {
+					return fmt.Errorf("network mount disconnected during deletion: %w", checkErr)
+				}
+				// Even if checkNetworkMount doesn't error, the operation failed due to network
+				return fmt.Errorf("network mount disconnected during deletion: %s", path)
+			}
+		}
 		
 		// Check if error is transient (file/directory busy, permission denied temporarily)
 		errStr := err.Error()

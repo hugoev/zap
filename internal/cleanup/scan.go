@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -135,6 +136,14 @@ func ScanDirectories(rootPath string, shouldCleanup func(path string, modTime ti
 
 	err = filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			// Check for network mount disconnection
+			if pathErr, ok := err.(*os.PathError); ok {
+				if pathErr.Err == syscall.ENOTCONN || pathErr.Err == syscall.EHOSTUNREACH || pathErr.Err == syscall.ETIMEDOUT {
+					scanErrors = append(scanErrors, fmt.Errorf("network mount disconnected: %s", path))
+					return filepath.SkipDir // Skip this directory and its children
+				}
+			}
+			
 			// Log permission errors but continue
 			if os.IsPermission(err) {
 				scanErrors = append(scanErrors, fmt.Errorf("permission denied: %s", path))
@@ -152,6 +161,14 @@ func ScanDirectories(rootPath string, shouldCleanup func(path string, modTime ti
 		// Skip symlinks to avoid following them into unexpected places
 		if info.Mode()&os.ModeSymlink != 0 {
 			return nil
+		}
+
+		// Check if this is a mount point (critical safety check)
+		isMount, mountErr := isMountPoint(path)
+		if mountErr == nil && isMount {
+			// Mount point detected - skip it and don't descend
+			scanErrors = append(scanErrors, fmt.Errorf("skipping mount point: %s", path))
+			return filepath.SkipDir
 		}
 
 		// Skip macOS system directories

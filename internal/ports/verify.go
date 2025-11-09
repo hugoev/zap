@@ -25,32 +25,76 @@ func VerifyProcessMatches(pid int, expected ProcessInfo) (bool, error) {
 		return false, fmt.Errorf("cannot verify process details")
 	}
 
-	// Verify key attributes match
-	// 1. Command should match (at least the base command)
-	if expected.Cmd != "" && current.Cmd != "" {
-		expectedBase := getBaseCommand(expected.Cmd)
-		currentBase := getBaseCommand(current.Cmd)
-		if expectedBase != currentBase {
-			return false, fmt.Errorf("process command changed: expected %s, got %s", expectedBase, currentBase)
+	// Verify key attributes match with tolerance for legitimate changes
+	// Priority: PID > Working Directory > Start Time > Command
+	
+	// 1. Start time should be close (within 1 second tolerance for clock skew)
+	// This is the most reliable indicator - if start time matches, it's likely the same process
+	startTimeMatches := false
+	if !expected.StartTime.IsZero() && !current.StartTime.IsZero() {
+		timeDiff := current.StartTime.Sub(expected.StartTime)
+		if timeDiff >= -1*time.Second && timeDiff <= 1*time.Second {
+			startTimeMatches = true
 		}
+	} else if expected.StartTime.IsZero() && current.StartTime.IsZero() {
+		// Both zero - can't use for verification
+		startTimeMatches = true // Don't fail on this
 	}
 
 	// 2. Working directory should match (if we have it)
+	// This is a strong indicator - processes rarely change working directory
+	workingDirMatches := false
 	if expected.WorkingDir != "" && current.WorkingDir != "" {
-		if expected.WorkingDir != current.WorkingDir {
-			return false, fmt.Errorf("process working directory changed: expected %s, got %s", expected.WorkingDir, current.WorkingDir)
+		if expected.WorkingDir == current.WorkingDir {
+			workingDirMatches = true
 		}
+	} else if expected.WorkingDir == "" && current.WorkingDir == "" {
+		// Both empty - can't use for verification
+		workingDirMatches = true // Don't fail on this
 	}
 
-	// 3. Start time should be close (within 1 second tolerance for clock skew)
-	if !expected.StartTime.IsZero() && !current.StartTime.IsZero() {
-		timeDiff := current.StartTime.Sub(expected.StartTime)
-		if timeDiff < -1*time.Second || timeDiff > 1*time.Second {
-			return false, fmt.Errorf("process start time mismatch: PID may have been reused")
+	// 3. Command should match (at least the base command)
+	// This is the least reliable - processes can legitimately change command line
+	// (e.g., Node.js hot reload, process re-exec with different args)
+	commandMatches := false
+	if expected.Cmd != "" && current.Cmd != "" {
+		expectedBase := getBaseCommand(expected.Cmd)
+		currentBase := getBaseCommand(current.Cmd)
+		if expectedBase == currentBase {
+			commandMatches = true
 		}
+	} else if expected.Cmd == "" && current.Cmd == "" {
+		// Both empty - can't use for verification
+		commandMatches = true // Don't fail on this
 	}
 
-	return true, nil
+	// Verification logic: Require at least 2 out of 3 matches, OR
+	// if working directory and start time match, allow command to differ
+	// (this handles legitimate command line changes)
+	matchCount := 0
+	if startTimeMatches {
+		matchCount++
+	}
+	if workingDirMatches {
+		matchCount++
+	}
+	if commandMatches {
+		matchCount++
+	}
+
+	// Require at least 2 matches, OR working dir + start time (allows command changes)
+	if matchCount >= 2 {
+		return true, nil
+	}
+
+	// Special case: if working directory and start time match, allow command to differ
+	// This handles processes that legitimately change their command line
+	if workingDirMatches && startTimeMatches {
+		return true, nil
+	}
+
+	// Not enough matches - likely PID reuse
+	return false, fmt.Errorf("process verification failed: start_time_match=%v, working_dir_match=%v, command_match=%v (PID may have been reused)", startTimeMatches, workingDirMatches, commandMatches)
 }
 
 // getBaseCommand extracts the base command name from a full command line

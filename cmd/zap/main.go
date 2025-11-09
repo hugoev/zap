@@ -1288,7 +1288,7 @@ func handleUpdate() {
 			versionStr, commitHash, dateStr)
 
 		log.VerboseLog("building with version: %s, commit: %s", versionStr, commitHash)
-		
+
 		// Build to temporary location first (safety: don't replace existing binary until verified)
 		tempBinaryPath := expectedZapPath + ".new"
 		buildCmd := exec.CommandContext(buildCtx, "go", "build", "-ldflags", ldflags, "-o", tempBinaryPath, "./cmd/zap")
@@ -1317,14 +1317,14 @@ func handleUpdate() {
 			// Make the binary executable
 			os.Chmod(tempBinaryPath, 0755)
 			log.VerboseLog("built binary with version %s at %s", versionStr, tempBinaryPath)
-			
+
 			// Verify the new binary works before replacing the old one
 			log.VerboseLog("verifying new binary...")
 			verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			verifyCmd := exec.CommandContext(verifyCtx, tempBinaryPath, "version")
 			verifyOutput, verifyErr := verifyCmd.Output()
 			verifyCancel()
-			
+
 			if verifyErr != nil {
 				// New binary is corrupted or doesn't work - don't replace
 				os.Remove(tempBinaryPath)
@@ -1333,7 +1333,7 @@ func handleUpdate() {
 				log.Log(log.INFO, "output: %s", string(verifyOutput))
 				os.Exit(1)
 			}
-			
+
 			// Binary works - create backup of existing binary if it exists
 			var backupPath string
 			if _, err := os.Stat(expectedZapPath); err == nil {
@@ -1346,7 +1346,7 @@ func handleUpdate() {
 					os.Exit(1)
 				}
 			}
-			
+
 			// Replace old binary with new one (atomic on most filesystems)
 			log.VerboseLog("replacing binary: %s -> %s", tempBinaryPath, expectedZapPath)
 			if err := os.Rename(tempBinaryPath, expectedZapPath); err != nil {
@@ -1366,14 +1366,14 @@ func handleUpdate() {
 				}
 				os.Exit(1)
 			}
-			
+
 			// Verify the replaced binary still works
 			log.VerboseLog("verifying replaced binary...")
 			finalVerifyCtx, finalVerifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			finalVerifyCmd := exec.CommandContext(finalVerifyCtx, expectedZapPath, "version")
 			finalVerifyOutput, finalVerifyErr := finalVerifyCmd.Output()
 			finalVerifyCancel()
-			
+
 			if finalVerifyErr != nil {
 				// Replacement corrupted the binary - restore from backup
 				log.Log(log.FAIL, "replaced binary verification failed: %v", finalVerifyErr)
@@ -1390,7 +1390,7 @@ func handleUpdate() {
 				}
 				os.Exit(1)
 			}
-			
+
 			// Success - clean up backup (optional, keep for safety)
 			log.VerboseLog("update successful - new binary verified")
 			log.VerboseLog("new version output: %s", strings.TrimSpace(string(finalVerifyOutput)))
