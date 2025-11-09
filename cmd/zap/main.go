@@ -4,15 +4,16 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
-	"github.com/zap/zap/internal/cleanup"
-	"github.com/zap/zap/internal/config"
-	"github.com/zap/zap/internal/log"
-	"github.com/zap/zap/internal/ports"
+	"github.com/hugoev/zap/internal/cleanup"
+	"github.com/hugoev/zap/internal/config"
+	"github.com/hugoev/zap/internal/log"
+	"github.com/hugoev/zap/internal/ports"
 )
 
 const version = "0.2.0"
@@ -48,6 +49,8 @@ func main() {
 		handleCleanup(cfg, yes, dryRun)
 	case "version", "v":
 		fmt.Printf("zap version %s\n", version)
+	case "update":
+		handleUpdate()
 	case "help", "h", "--help", "-h":
 		printUsage()
 	default:
@@ -78,6 +81,7 @@ func printUsage() {
 	fmt.Println("  ports     Scan and free up ports")
 	fmt.Println("  cleanup   Remove stale dependency/cache folders")
 	fmt.Println("  version   Display version information")
+	fmt.Println("  update    Update zap to the latest version")
 	fmt.Println()
 	fmt.Println("Flags:")
 	fmt.Println("  --yes, -y        Execute without confirmation where safe")
@@ -88,6 +92,7 @@ func printUsage() {
 	fmt.Println("  zap ports         # Free up ports")
 	fmt.Println("  zap ports --yes   # Free up ports without prompts")
 	fmt.Println("  zap cleanup       # Clean up stale directories")
+	fmt.Println("  zap update        # Update to latest version")
 }
 
 func handlePorts(cfg *config.Config, yes, dryRun bool) {
@@ -401,4 +406,34 @@ func findProjectDirectories(homeDir string) []string {
 	}
 
 	return paths
+}
+
+func handleUpdate() {
+	log.Log(log.SCAN, "checking for updates...")
+
+	// Check if go is available
+	if _, err := exec.LookPath("go"); err != nil {
+		log.Log(log.FAIL, "go command not found. Please install Go to use the update command.")
+		os.Exit(1)
+	}
+
+	// Get current version
+	currentVersion := version
+	log.Log(log.INFO, "current version: %s", currentVersion)
+
+	// Install latest version
+	log.Log(log.INFO, "downloading latest version...")
+	cmd := exec.Command("go", "install", "github.com/hugoev/zap/cmd/zap@latest")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		log.Log(log.FAIL, "failed to update: %v", err)
+		log.Log(log.INFO, "you can manually update by running: go install github.com/hugoev/zap/cmd/zap@latest")
+		os.Exit(1)
+	}
+
+	// Try to get the new version by running the updated binary
+	log.Log(log.OK, "update complete!")
+	log.Log(log.INFO, "run 'zap version' to verify the new version")
 }

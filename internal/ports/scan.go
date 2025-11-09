@@ -49,10 +49,15 @@ func getProcessesOnPort(port int) ([]ProcessInfo, error) {
 	var processes []ProcessInfo
 
 	// Use lsof to find processes listening on the port
+	// lsof is available on macOS and most Linux distributions
 	cmd := exec.Command("lsof", "-i", fmt.Sprintf(":%d", port), "-sTCP:LISTEN", "-P", "-n")
 	output, err := cmd.Output()
 	if err != nil {
-		// No process found on this port
+		// Check if lsof command exists
+		if _, err := exec.LookPath("lsof"); err != nil {
+			return nil, fmt.Errorf("lsof command not found. Please install lsof (usually pre-installed on macOS/Linux)")
+		}
+		// No process found on this port (normal case)
 		return processes, nil
 	}
 

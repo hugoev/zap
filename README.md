@@ -44,32 +44,64 @@ zap version
 
 The binary will be installed to `~/go/bin/zap` (or `$GOPATH/bin/zap` if GOPATH is set).
 
-## Quick Start
+### Updating
 
-### Free up ports
+**Method 1: If you cloned the repository**
 
 ```bash
-# Scan and see what's running
-zap ports
+# Navigate to where you cloned zap
+cd ~/path/to/zap  # or wherever you cloned it
 
-# Auto-terminate safe dev servers without prompts
-zap ports --yes
+# Pull the latest changes
+git pull
 
-# See what would be terminated (dry run)
-zap ports --dry-run
+# Reinstall the updated version
+go install ./cmd/zap
+
+# Verify the update
+zap version
 ```
 
-### Clean up stale directories
+**Method 2: Update from anywhere (recommended)**
 
 ```bash
-# Find stale dependency directories
-zap cleanup --dry-run
+# This will download and install the latest version
+go install github.com/hugoev/zap/cmd/zap@latest
 
-# Remove them (with confirmation)
+# Verify the update
+zap version
+```
+
+**Method 3: Using the update command (easiest)**
+
+```bash
+# Simply run the update command
+zap update
+
+# Verify the update
+zap version
+```
+
+**Check your current version:**
+
+```bash
+zap version
+```
+
+## Quick Start
+
+```bash
+# Free up ports
+zap ports
+
+# Free up ports without prompts
+zap ports --yes
+
+# Clean up stale directories
 zap cleanup
 
-# Auto-remove without prompts
-zap cleanup --yes
+# See what would be cleaned (dry run)
+zap cleanup --dry-run
 ```
 
 ## Features
@@ -84,6 +116,7 @@ zap cleanup --yes
 
 ### Workspace Cleanup
 
+- Auto-detects common project directories (Documents, Projects, Code, etc.)
 - Finds stale dependency directories:
   - `node_modules`, `.venv`, `.cache`, `.gradle`, `.mypy_cache`
   - `__pycache__`, `.pytest_cache`, `target`, `dist`, `build`
@@ -103,11 +136,12 @@ zap cleanup --yes
 
 ### Commands
 
-| Command       | Description                               |
-| ------------- | ----------------------------------------- |
-| `zap ports`   | Scan and terminate orphaned dev processes |
-| `zap cleanup` | Remove stale dependency/cache folders     |
-| `zap version` | Display version information               |
+| Command       | Description                           |
+| ------------- | ------------------------------------- |
+| `zap ports`   | Scan and free up ports                |
+| `zap cleanup` | Remove stale dependency/cache folders |
+| `zap version` | Display version information           |
+| `zap update`  | Update zap to the latest version      |
 
 ### Flags
 
@@ -132,13 +166,13 @@ STATS    terminated 2 process(es), 1 skipped
 
 ## Configuration
 
-Configuration is stored at `~/.config/zap/config.json` and persists automatically.
+zap works out of the box with sensible defaults. Configuration is optional and stored at `~/.config/zap/config.json`.
 
 ```json
 {
   "protected_ports": [5432, 6379],
   "max_age_days_for_cleanup": 14,
-  "exclude_paths": ["~/work/critical/node_modules"],
+  "exclude_paths": [],
   "auto_confirm_safe_actions": false
 }
 ```
