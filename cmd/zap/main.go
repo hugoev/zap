@@ -896,12 +896,12 @@ func validatePath(path string) error {
 	if path == "" {
 		return fmt.Errorf("path cannot be empty")
 	}
-	
+
 	// Basic validation - ensure no shell injection characters
 	if strings.ContainsAny(path, "\n\r\t$`\"'\\") {
 		return fmt.Errorf("path contains invalid characters")
 	}
-	
+
 	return nil
 }
 
@@ -914,10 +914,10 @@ func shellEscape(s string) string {
 func showPathInstructions(goBinPath, shellName string) {
 	fmt.Println()
 	log.Log(log.INFO, "to add %s to your PATH manually:", goBinPath)
-	
+
 	// Escape path for display
 	escapedPath := shellEscape(goBinPath)
-	
+
 	switch shellName {
 	case "bash":
 		if runtime.GOOS == "darwin" {
@@ -1055,9 +1055,11 @@ func handleUpdate() {
 	var latestTag string
 	var latestVersion Version
 
-	maxRetries := 3
+	maxRetries := 5
+	baseDelay := 1 * time.Second
+	
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 
 		tagCmd := exec.CommandContext(ctx2, "git", "ls-remote", "--tags", "--sort=-v:refname", "https://github.com/hugoev/zap.git", "v*")
 		tagOutput, tagErr := tagCmd.Output()
@@ -1103,8 +1105,12 @@ func handleUpdate() {
 		}
 
 		if attempt < maxRetries {
-			log.VerboseLog("tag fetch attempt %d failed, retrying...", attempt)
-			time.Sleep(time.Duration(attempt) * time.Second)
+			// Exponential backoff: 1s, 2s, 4s, 8s, 16s
+			delay := baseDelay * time.Duration(1<<uint(attempt-1))
+			log.VerboseLog("network error (attempt %d/%d), retrying in %v...", attempt, maxRetries, delay)
+			time.Sleep(delay)
+		} else {
+			log.VerboseLog("failed to fetch tags after %d attempts", maxRetries)
 		}
 	}
 

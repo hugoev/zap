@@ -3,8 +3,12 @@ package lock
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
+	"time"
 )
 
 // InstanceLock prevents multiple instances of zap from running simultaneously
@@ -26,6 +30,11 @@ func AcquireLock() (*InstanceLock, error) {
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create lock directory: %w", err)
+	}
+
+	// Check for stale lock file and clean it up if needed
+	if err := cleanupStaleLock(lockPath); err != nil {
+		// Log but don't fail - we'll try to acquire lock anyway
 	}
 
 	// Open lock file
@@ -56,6 +65,64 @@ func AcquireLock() (*InstanceLock, error) {
 	file.Sync()
 
 	return &InstanceLock{lockFile: file, path: lockPath}, nil
+}
+
+// cleanupStaleLock checks if lock file is stale and removes it if the process is no longer running
+func cleanupStaleLock(lockPath string) error {
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No lock file, nothing to clean
+		}
+		return err
+	}
+
+	// Check if lock is stale (older than 1 hour)
+	if time.Since(info.ModTime()) > 1*time.Hour {
+		// Read PID from lock file
+		pidData, readErr := os.ReadFile(lockPath)
+		if readErr != nil {
+			// Can't read PID, but file is stale - remove it
+			os.Remove(lockPath)
+			return nil
+		}
+
+		// Parse PID
+		pidStr := strings.TrimSpace(string(pidData))
+		pid, parseErr := strconv.Atoi(pidStr)
+		if parseErr != nil {
+			// Invalid PID format - remove stale lock
+			os.Remove(lockPath)
+			return nil
+		}
+
+		// Check if process is still running
+		if !isProcessRunning(pid) {
+			// Process is gone, remove stale lock
+			os.Remove(lockPath)
+			return nil
+		}
+		// Process is still running, lock is valid
+	}
+
+	return nil
+}
+
+// isProcessRunning checks if a process with the given PID is running
+func isProcessRunning(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+
+	// Use ps to check if process exists
+	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "pid=")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	// If output contains the PID, process is running
+	return strings.TrimSpace(string(output)) == strconv.Itoa(pid)
 }
 
 // Release releases the lock and removes the lock file

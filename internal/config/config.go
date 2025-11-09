@@ -33,13 +33,29 @@ var configMutex sync.RWMutex
 func getConfigPath() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		// Fallback to temp directory if home directory is unavailable
+		tempDir := os.TempDir()
+		configDir := filepath.Join(tempDir, "zap-config")
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			return "", fmt.Errorf("failed to create config directory in temp: %w", err)
+		}
+		return filepath.Join(configDir, "config.json"), nil
 	}
+	
 	configDir := filepath.Join(homeDir, ".config", "zap")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return "", err
+		// Try alternative location if .config can't be created
+		altDir := filepath.Join(os.TempDir(), "zap-config")
+		if mkdirErr := os.MkdirAll(altDir, 0755); mkdirErr == nil {
+			return filepath.Join(altDir, "config.json"), nil
+		}
+		return "", fmt.Errorf("failed to create config directory: %w", err)
 	}
 	return filepath.Join(configDir, "config.json"), nil
+}
+
+func getBackupPath(configPath string) string {
+	return configPath + ".backup"
 }
 
 func Load() (*Config, error) {
@@ -97,22 +113,114 @@ func Load() (*Config, error) {
 
 		var cfg Config
 		if err := json.Unmarshal(data, &cfg); err != nil {
-			return nil, err
+			// Config is corrupted - try to recover
+			return recoverFromCorruption(configPath, err)
 		}
+
+		// Validate config
+		if err := cfg.Validate(); err != nil {
+			// Try backup
+			if backupCfg, backupErr := loadFromBackup(configPath); backupErr == nil {
+				if backupErr := backupCfg.Validate(); backupErr == nil {
+					if saveErr := saveWithLock(backupCfg); saveErr == nil {
+						return backupCfg, nil
+					}
+				}
+			}
+			// Reset to defaults
+			cfg = defaultConfig
+			if saveErr := saveWithLock(&cfg); saveErr != nil {
+				return nil, fmt.Errorf("config validation failed: %w", err)
+			}
+			return &cfg, nil
+		}
+
+		// Create backup
+		backupPath := getBackupPath(configPath)
+		os.WriteFile(backupPath, data, 0644)
+
 		mergeWithDefaults(&cfg)
 		return &cfg, nil
 	}
 
+	// Read file content for backup and decoding
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config: %w", err)
+	}
+
 	// Decode from file
 	var cfg Config
-	decoder := json.NewDecoder(file)
-	if err := decoder.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("failed to decode config: %w", err)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		// Config is corrupted - try to recover from backup
+		return recoverFromCorruption(configPath, err)
 	}
+
+	// Validate config
+	if err := cfg.Validate(); err != nil {
+		// Config has invalid values - try backup, then reset to defaults
+		if backupCfg, backupErr := loadFromBackup(configPath); backupErr == nil {
+			if backupErr := backupCfg.Validate(); backupErr == nil {
+				// Backup is valid, restore it
+				if saveErr := saveWithLock(backupCfg); saveErr == nil {
+					return backupCfg, nil
+				}
+			}
+		}
+		// Backup invalid or restore failed - reset to defaults
+		cfg = defaultConfig
+		if saveErr := saveWithLock(&cfg); saveErr != nil {
+			return nil, fmt.Errorf("config validation failed and could not reset: %w (original error: %v)", saveErr, err)
+		}
+		return &cfg, nil
+	}
+
+	// Successfully loaded - create/update backup
+	backupPath := getBackupPath(configPath)
+	os.WriteFile(backupPath, data, 0644)
 
 	// Merge with defaults for missing fields
 	mergeWithDefaults(&cfg)
 
+	return &cfg, nil
+}
+
+func recoverFromCorruption(configPath string, decodeErr error) (*Config, error) {
+	// Try to restore from backup
+	if backupCfg, err := loadFromBackup(configPath); err == nil {
+		// Backup exists and is valid - restore it
+		if saveErr := saveWithLock(backupCfg); saveErr == nil {
+			return backupCfg, nil
+		}
+	}
+
+	// No valid backup - rename corrupted file and create new
+	corruptedPath := configPath + ".corrupted." + fmt.Sprintf("%d", time.Now().Unix())
+	if renameErr := os.Rename(configPath, corruptedPath); renameErr == nil {
+		// Create new config with defaults
+		cfg := defaultConfig
+		if saveErr := saveWithLock(&cfg); saveErr != nil {
+			return nil, fmt.Errorf("config corrupted and could not create new config: %w (corrupted file saved as: %s)", saveErr, corruptedPath)
+		}
+		return &cfg, nil
+	}
+
+	return nil, fmt.Errorf("config file corrupted and recovery failed: %w", decodeErr)
+}
+
+func loadFromBackup(configPath string) (*Config, error) {
+	backupPath := getBackupPath(configPath)
+	data, err := os.ReadFile(backupPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+
+	mergeWithDefaults(&cfg)
 	return &cfg, nil
 }
 
@@ -172,6 +280,12 @@ func saveWithLock(cfg *Config) error {
 			return fmt.Errorf("failed to sync config: %w", err)
 		}
 
+		// Create backup before replacing
+		if existingData, readErr := os.ReadFile(configPath); readErr == nil {
+			backupPath := getBackupPath(configPath)
+			os.WriteFile(backupPath, existingData, 0644)
+		}
+
 		// Atomic rename (atomic on most filesystems)
 		if err := os.Rename(tempPath, configPath); err != nil {
 			return fmt.Errorf("failed to commit config: %w", err)
@@ -182,6 +296,12 @@ func saveWithLock(cfg *Config) error {
 			return fmt.Errorf("failed to write temp config: %w", err)
 		}
 		defer os.Remove(tempPath) // Cleanup on error
+
+		// Create backup before replacing
+		if existingData, readErr := os.ReadFile(configPath); readErr == nil {
+			backupPath := getBackupPath(configPath)
+			os.WriteFile(backupPath, existingData, 0644)
+		}
 
 		// Atomic rename
 		if err := os.Rename(tempPath, configPath); err != nil {
@@ -237,6 +357,36 @@ func (c *Config) AddExcludePath(path string) error {
 
 	c.ExcludePaths = append(c.ExcludePaths, absPath)
 	return Save(c)
+}
+
+// Validate checks that all config values are within acceptable ranges
+func (c *Config) Validate() error {
+	// Validate protected ports
+	for _, port := range c.ProtectedPorts {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("invalid protected port: %d (must be 1-65535)", port)
+		}
+	}
+
+	// Validate max age
+	if c.MaxAgeDaysForCleanup < 1 {
+		return fmt.Errorf("max_age_days_for_cleanup must be at least 1")
+	}
+	if c.MaxAgeDaysForCleanup > 365 {
+		return fmt.Errorf("max_age_days_for_cleanup cannot exceed 365 days")
+	}
+
+	// Validate exclude paths
+	for _, path := range c.ExcludePaths {
+		if path == "" {
+			return fmt.Errorf("exclude path cannot be empty")
+		}
+		if !filepath.IsAbs(path) {
+			return fmt.Errorf("exclude path must be absolute: %s", path)
+		}
+	}
+
+	return nil
 }
 
 func (c *Config) ShouldCleanup(path string, modTime time.Time) bool {

@@ -26,8 +26,20 @@ func KillProcess(pid int) error {
 		return fmt.Errorf("process %d is not running", pid)
 	}
 
+	// Check permissions before attempting to kill
+	if err := checkPermissionBeforeKill(pid); err != nil {
+		return err
+	}
+
 	// Try to kill process group first (handles child processes)
 	if err := KillProcessGroup(pid); err == nil {
+		// Verify process didn't respawn (check for process managers)
+		time.Sleep(500 * time.Millisecond)
+		if IsProcessRunning(pid) {
+			if manager := detectProcessManager(pid); manager != "" {
+				return fmt.Errorf("process %d respawned (managed by %s). Stop the service instead: %s", pid, manager, getServiceStopCommand(pid, manager))
+			}
+		}
 		return nil // Successfully killed process group
 	}
 
@@ -189,4 +201,64 @@ func IsProcessRunning(pid int) bool {
 
 	// If output contains the PID, process is running
 	return strings.TrimSpace(string(output)) == strconv.Itoa(pid)
+}
+
+// detectProcessManager checks if a process is managed by systemd, supervisor, etc.
+func detectProcessManager(pid int) string {
+	if runtime.GOOS == "linux" {
+		// Check systemd cgroup
+		cgroupPath := fmt.Sprintf("/proc/%d/cgroup", pid)
+		if data, err := os.ReadFile(cgroupPath); err == nil {
+			content := string(data)
+			if strings.Contains(content, "systemd") {
+				return "systemd"
+			}
+			if strings.Contains(content, "supervisor") {
+				return "supervisor"
+			}
+		}
+
+		// Check systemd status
+		cmd := exec.Command("systemctl", "status", strconv.Itoa(pid))
+		if err := cmd.Run(); err == nil {
+			return "systemd"
+		}
+	}
+
+	// Check supervisor
+	cmd := exec.Command("supervisorctl", "status", strconv.Itoa(pid))
+	if err := cmd.Run(); err == nil {
+		return "supervisor"
+	}
+
+	return ""
+}
+
+// getServiceStopCommand returns the command to stop a service managed by a process manager
+func getServiceStopCommand(pid int, manager string) string {
+	switch manager {
+	case "systemd":
+		// Try to get service name from systemd
+		cmd := exec.Command("systemctl", "status", strconv.Itoa(pid))
+		output, err := cmd.Output()
+		if err == nil {
+			// Parse service name from output (simplified)
+			lines := strings.Split(string(output), "\n")
+			for _, line := range lines {
+				if strings.Contains(line, ".service") {
+					parts := strings.Fields(line)
+					for _, part := range parts {
+						if strings.HasSuffix(part, ".service") {
+							return fmt.Sprintf("systemctl stop %s", part)
+						}
+					}
+				}
+			}
+		}
+		return "systemctl stop <service-name>"
+	case "supervisor":
+		return "supervisorctl stop <process-name>"
+	default:
+		return ""
+	}
 }
