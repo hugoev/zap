@@ -4,25 +4,59 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'cmd/zap/main.go'  # Only trigger when version file changes
 
 jobs:
-  detect-version:
+  detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      version_exists: ${{ steps.check-tag.outputs.exists }}
-      should_release: ${{ steps.version.outputs.should_release }}
+      go_files_changed: ${{ steps.changes.outputs.go }}
+      version_changed: ${{ steps.changes.outputs.version }}
+      should_bump: ${{ steps.changes.outputs.go == 'true' && steps.changes.outputs.version != 'true' }}
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Fetch all history for tags
+          fetch-depth: 0
       
-      - name: Extract version from main.go
-        id: version
+      - name: Detect changed files
+        id: changes
+        run: |
+          # Check if any .go files changed (excluding main.go version changes)
+          GO_CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '\.go$' | grep -v '^cmd/zap/main.go$' | wc -l | tr -d ' ')
+          VERSION_CHANGED=$(git diff HEAD~1 HEAD -- cmd/zap/main.go | grep -E '^\+.*const version' || echo "")
+          
+          if [ "$GO_CHANGED" -gt 0 ]; then
+            echo "go=true" >> $GITHUB_OUTPUT
+            echo "✅ Found $GO_CHANGED .go file(s) changed"
+          else
+            echo "go=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if [ -n "$VERSION_CHANGED" ]; then
+            echo "version=true" >> $GITHUB_OUTPUT
+            echo "✅ Version was manually changed"
+          else
+            echo "version=false" >> $GITHUB_OUTPUT
+          fi
+
+  bump-version:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.should_bump == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.bump.outputs.new_version }}
+      old_version: ${{ steps.bump.outputs.old_version }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract current version
+        id: current
         run: |
           VERSION=$(grep -E '^const version = ' cmd/zap/main.go | sed -E "s/^const version = \"([^\"]+)\"/\1/")
           if [ -z "$VERSION" ]; then
@@ -30,22 +64,105 @@ jobs:
             exit 1
           fi
           
-          # Normalize version: if only MAJOR.MINOR, add .0 for PATCH
+          # Normalize: if only MAJOR.MINOR, add .0 for PATCH
           if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+$'; then
             VERSION="${VERSION}.0"
-            echo "ℹ️  Normalized version to ${VERSION} (added .0 for patch)"
           fi
           
-          # Validate semantic version format (MAJOR.MINOR.PATCH)
+          # Validate format
           if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "❌ Invalid version format: $VERSION"
-            echo "   Expected: MAJOR.MINOR.PATCH (e.g., 4.1.0) or MAJOR.MINOR (e.g., 4.1 → 4.1.0)"
             exit 1
           fi
           
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "should_release=true" >> $GITHUB_OUTPUT
-          echo "✅ Found version: $VERSION"
+          echo "✅ Current version: $VERSION"
+      
+      - name: Bump patch version
+        id: bump
+        run: |
+          OLD_VERSION="${{ steps.current.outputs.version }}"
+          
+          # Parse version parts
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$OLD_VERSION"
+          
+          # Increment patch version
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+          
+          echo "old_version=$OLD_VERSION" >> $GITHUB_OUTPUT
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "✅ Bumping version: $OLD_VERSION → $NEW_VERSION"
+      
+      - name: Update version in main.go
+        run: |
+          OLD_VERSION="${{ steps.current.outputs.version }}"
+          NEW_VERSION="${{ steps.bump.outputs.new_version }}"
+          
+          # Update the version constant
+          if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS
+            sed -i '' "s/const version = \"${OLD_VERSION}\"/const version = \"${NEW_VERSION}\"/" cmd/zap/main.go
+          else
+            # Linux
+            sed -i "s/const version = \"${OLD_VERSION}\"/const version = \"${NEW_VERSION}\"/" cmd/zap/main.go
+          fi
+          
+          echo "✅ Updated cmd/zap/main.go: ${OLD_VERSION} → ${NEW_VERSION}"
+      
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add cmd/zap/main.go
+          git commit -m "chore: auto-bump version to ${{ steps.bump.outputs.new_version }}"
+          git push origin main
+          
+          echo "✅ Committed and pushed version bump"
+
+  create-release:
+    needs: [detect-changes, bump-version]
+    if: |
+      (needs.detect-changes.outputs.version_changed == 'true' || needs.bump-version.outputs.new_version != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Determine version to release
+        id: version
+        run: |
+          # If version was auto-bumped, use that. Otherwise, extract from main.go
+          if [ -n "${{ needs.bump-version.outputs.new_version }}" ]; then
+            VERSION="${{ needs.bump-version.outputs.new_version }}"
+            echo "Using auto-bumped version: $VERSION"
+          else
+            VERSION=$(grep -E '^const version = ' cmd/zap/main.go | sed -E "s/^const version = \"([^\"]+)\"/\1/")
+            if [ -z "$VERSION" ]; then
+              echo "❌ Could not extract version from cmd/zap/main.go"
+              exit 1
+            fi
+            
+            # Normalize: if only MAJOR.MINOR, add .0 for PATCH
+            if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+$'; then
+              VERSION="${VERSION}.0"
+            fi
+          fi
+          
+          # Validate format
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "❌ Invalid version format: $VERSION"
+            exit 1
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "✅ Version to release: $VERSION"
       
       - name: Check if tag already exists
         id: check-tag
@@ -73,22 +190,10 @@ jobs:
           echo "tag=${PREV_TAG}" >> $GITHUB_OUTPUT
           echo "ℹ️  Previous version: ${PREV_TAG}"
 
-  create-release:
-    needs: detect-version
-    if: needs.detect-version.outputs.should_release == 'true' && needs.detect-version.outputs.version_exists == 'false'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
       - name: Create Git tag
+        if: steps.check-tag.outputs.exists == 'false'
         run: |
-          VERSION="${{ needs.detect-version.outputs.version }}"
+          VERSION="${{ steps.version.outputs.version }}"
           TAG="v${VERSION}"
           
           git config user.name "github-actions[bot]"
@@ -102,9 +207,10 @@ jobs:
       
       - name: Generate release notes
         id: release-notes
+        if: steps.check-tag.outputs.exists == 'false'
         run: |
-          VERSION="${{ needs.detect-version.outputs.version }}"
-          PREV_TAG="${{ needs.detect-version.outputs.prev-version }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          PREV_TAG="${{ steps.prev-version.outputs.tag }}"
           TAG="v${VERSION}"
           
           # Get commits since last tag
@@ -136,35 +242,13 @@ jobs:
           cat release_notes.md
       
       - name: Create GitHub Release
+        if: steps.check-tag.outputs.exists == 'false'
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v${{ needs.detect-version.outputs.version }}
-          release_name: Release v${{ needs.detect-version.outputs.version }}
+          tag_name: v${{ steps.version.outputs.version }}
+          release_name: Release v${{ steps.version.outputs.version }}
           body_path: release_notes.md
           draft: false
           prerelease: false
-      
-      - name: Build and attach binaries (optional)
-        run: |
-          echo "ℹ️  Binaries can be built and attached here if needed"
-          echo "For Go projects, users typically install via 'go install'"
-
-  validate-version:
-    needs: detect-version
-    if: always() && needs.detect-version.outputs.version_exists == 'true'
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Validate version consistency
-        run: |
-          VERSION="${{ needs.detect-version.outputs.version }}"
-          TAG="v${VERSION}"
-          
-          echo "ℹ️  Version ${VERSION} in code matches existing tag ${TAG}"
-          echo "✅ No release needed - version already tagged"
-
