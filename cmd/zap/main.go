@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 	"github.com/zap/zap/internal/ports"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -41,13 +42,16 @@ func main() {
 	log.Verbose = verbose
 
 	switch command {
-	case "ports":
+	case "ports", "port":
 		handlePorts(cfg, yes, dryRun)
-	case "cleanup":
+	case "cleanup", "clean":
 		handleCleanup(cfg, yes, dryRun)
-	case "version":
+	case "version", "v":
 		fmt.Printf("zap version %s\n", version)
+	case "help", "h", "--help", "-h":
+		printUsage()
 	default:
+		log.Log(log.FAIL, "Unknown command: %s", command)
 		printUsage()
 		os.Exit(1)
 	}
@@ -71,14 +75,19 @@ func printUsage() {
 	fmt.Println("Usage: zap <command> [flags]")
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  ports     Scan and terminate orphaned dev processes")
+	fmt.Println("  ports     Scan and free up ports")
 	fmt.Println("  cleanup   Remove stale dependency/cache folders")
-	fmt.Println("  version   Display version and build metadata")
+	fmt.Println("  version   Display version information")
 	fmt.Println()
 	fmt.Println("Flags:")
 	fmt.Println("  --yes, -y        Execute without confirmation where safe")
 	fmt.Println("  --dry-run        Show planned actions without making changes")
 	fmt.Println("  --verbose, -v    Show detailed progress and information")
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  zap ports         # Free up ports")
+	fmt.Println("  zap ports --yes   # Free up ports without prompts")
+	fmt.Println("  zap cleanup       # Clean up stale directories")
 }
 
 func handlePorts(cfg *config.Config, yes, dryRun bool) {
@@ -226,13 +235,14 @@ func handleCleanup(cfg *config.Config, yes, dryRun bool) {
 		os.Exit(1)
 	}
 
-	// Scan common development directories
-	scanPaths := []string{
-		filepath.Join(homeDir, "Documents"),
-		filepath.Join(homeDir, "Projects"),
-		filepath.Join(homeDir, "Code"),
-		filepath.Join(homeDir, "workspace"),
-		filepath.Join(homeDir, "work"),
+	// Auto-detect common development directories
+	scanPaths := findProjectDirectories(homeDir)
+
+	if len(scanPaths) == 0 {
+		log.Log(log.INFO, "no common project directories found, scanning home directory")
+		scanPaths = []string{homeDir}
+	} else {
+		log.VerboseLog("scanning %d project directory path(s)", len(scanPaths))
 	}
 
 	var allDirs []cleanup.DirectoryInfo
@@ -358,4 +368,37 @@ func getCommonPorts() []int {
 		9000, 9001,
 		7000, 7001,
 	}
+}
+
+// findProjectDirectories auto-detects common project directory locations
+func findProjectDirectories(homeDir string) []string {
+	var paths []string
+
+	// Common project directory names (case-insensitive on macOS)
+	candidates := []string{
+		"Documents", "Projects", "Code", "workspace", "work",
+		"Development", "dev", "src", "repos", "repositories",
+		"git", "github", "gitlab", "bitbucket",
+	}
+
+	for _, name := range candidates {
+		path := filepath.Join(homeDir, name)
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			paths = append(paths, path)
+		}
+	}
+
+	// Also check common macOS locations
+	if runtime.GOOS == "darwin" {
+		macPaths := []string{
+			filepath.Join(homeDir, "Desktop"),
+		}
+		for _, path := range macPaths {
+			if info, err := os.Stat(path); err == nil && info.IsDir() {
+				paths = append(paths, path)
+			}
+		}
+	}
+
+	return paths
 }
