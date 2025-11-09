@@ -51,21 +51,44 @@ var commonDevPorts = []int{
 	5000, 5001,
 	// Additional common ranges
 	7000, 7001, 7002, // Phoenix, LiveView
-	6000, 6001,       // Additional dev servers
+	6000, 6001, // Additional dev servers
 }
 
 func ScanPorts() ([]ProcessInfo, error) {
+	return ScanPortsRange(commonDevPorts)
+}
+
+// ScanPortsRange scans a specific list of ports (allows custom port ranges)
+func ScanPortsRange(ports []int) ([]ProcessInfo, error) {
 	var processes []ProcessInfo
 	var scanErrors []error
 
-	for _, port := range commonDevPorts {
-		procs, err := getProcessesOnPort(port)
-		if err != nil {
+	// Use goroutines for parallel scanning (faster on multi-core systems)
+	type result struct {
+		procs []ProcessInfo
+		err   error
+		port  int
+	}
+
+	results := make(chan result, len(ports))
+	
+	// Launch parallel scans
+	for _, port := range ports {
+		go func(p int) {
+			procs, err := getProcessesOnPort(p)
+			results <- result{procs: procs, err: err, port: p}
+		}(port)
+	}
+
+	// Collect results
+	for i := 0; i < len(ports); i++ {
+		res := <-results
+		if res.err != nil {
 			// Log error but continue scanning other ports
-			scanErrors = append(scanErrors, fmt.Errorf("port %d: %w", port, err))
+			scanErrors = append(scanErrors, fmt.Errorf("port %d: %w", res.port, res.err))
 			continue
 		}
-		processes = append(processes, procs...)
+		processes = append(processes, res.procs...)
 	}
 
 	// If we got some processes, return them even if there were some scan errors
@@ -93,7 +116,7 @@ func getProcessesOnPort(port int) ([]ProcessInfo, error) {
 	// 1. Try lsof first (macOS and most Linux)
 	// 2. Fallback to ss (modern Linux)
 	// 3. Fallback to netstat (older Linux)
-	
+
 	var output []byte
 	var err error
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -380,7 +403,7 @@ func getProcessDetails(pid int) processDetails {
 		args []string
 	}{
 		{[]string{"-p", strconv.Itoa(pid), "-o", "lstart="}}, // BSD/macOS
-		{[]string{"-p", strconv.Itoa(pid), "-o", "start="}}, // GNU/Linux
+		{[]string{"-p", strconv.Itoa(pid), "-o", "start="}},  // GNU/Linux
 	}
 	for _, format := range startFormats {
 		cmd := exec.CommandContext(ctx, "ps", format.args...)

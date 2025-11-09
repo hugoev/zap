@@ -20,6 +20,92 @@ import (
 	"github.com/hugoev/zap/internal/version"
 )
 
+// commonDevPorts is the default list of ports to scan
+var commonDevPorts = []int{
+	// Node.js, React, Next.js
+	3000, 3001, 3002, 3003, 3004, 3005,
+	// Vite, Vite-based frameworks
+	5173, 5174, 5175, 5176, 5177,
+	// Python (Flask, Django, FastAPI, Uvicorn)
+	5000, 5001, 8000, 8001, 8080, 8081, 8888,
+	// Go, Rust, general dev servers
+	4000, 4001, 4002, 4003,
+	// Angular
+	4200, 4201,
+	// Play framework, Scala
+	9000, 9001, 9002,
+	// Phoenix, Elixir
+	7000, 7001, 7002,
+	// Java Spring Boot
+	8080, 8081, 8082,
+	// .NET
+	5000, 5001,
+	// Additional common ranges
+	6000, 6001,
+}
+
+// parsePortRange parses port ranges like "3000-3010,8080,9000-9005"
+func parsePortRange(portsStr string) ([]int, error) {
+	var ports []int
+	seen := make(map[int]bool)
+	
+	parts := strings.Split(portsStr, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		
+		// Check if it's a range (e.g., "3000-3010")
+		if strings.Contains(part, "-") {
+			rangeParts := strings.Split(part, "-")
+			if len(rangeParts) != 2 {
+				return nil, fmt.Errorf("invalid port range: %s", part)
+			}
+			start, err := strconv.Atoi(strings.TrimSpace(rangeParts[0]))
+			if err != nil {
+				return nil, fmt.Errorf("invalid start port: %s", rangeParts[0])
+			}
+			end, err := strconv.Atoi(strings.TrimSpace(rangeParts[1]))
+			if err != nil {
+				return nil, fmt.Errorf("invalid end port: %s", rangeParts[1])
+			}
+			if start > end {
+				return nil, fmt.Errorf("start port (%d) must be <= end port (%d)", start, end)
+			}
+			if start < 1 || end > 65535 {
+				return nil, fmt.Errorf("ports must be in range 1-65535")
+			}
+			// Add all ports in range
+			for p := start; p <= end; p++ {
+				if !seen[p] {
+					ports = append(ports, p)
+					seen[p] = true
+				}
+			}
+		} else {
+			// Single port
+			port, err := strconv.Atoi(part)
+			if err != nil {
+				return nil, fmt.Errorf("invalid port: %s", part)
+			}
+			if port < 1 || port > 65535 {
+				return nil, fmt.Errorf("port must be in range 1-65535: %d", port)
+			}
+			if !seen[port] {
+				ports = append(ports, port)
+				seen[port] = true
+			}
+		}
+	}
+	
+	if len(ports) == 0 {
+		return nil, fmt.Errorf("no valid ports specified")
+	}
+	
+	return ports, nil
+}
+
 // Version represents a semantic version
 type Version struct {
 	Major int
@@ -117,23 +203,30 @@ func main() {
 	}
 
 	// Parse flags
-	flags := parseFlags(args)
+	flags, flagValues := parseFlags(args)
 	yes := flags["yes"] || flags["y"]
 	dryRun := flags["dry-run"]
 	verbose := flags["verbose"] || flags["v"]
+	jsonOutput := flags["json"] || flags["j"]
 
 	// Set verbose mode globally
 	log.Verbose = verbose
 
 	switch command {
 	case "ports", "port":
-		handlePorts(cfg, yes, dryRun)
+		handlePorts(cfg, yes, dryRun, jsonOutput, flagValues)
 	case "cleanup", "clean":
-		handleCleanup(cfg, yes, dryRun)
+		handleCleanup(cfg, yes, dryRun, jsonOutput, flagValues)
 	case "version", "v":
-		fmt.Printf("zap version %s\n", version.Get())
+		if jsonOutput {
+			fmt.Printf(`{"version":"%s","commit":"%s","date":"%s"}`+"\n", version.Get(), version.GetCommit(), version.GetDate())
+		} else {
+			fmt.Printf("zap version %s\n", version.Get())
+		}
 	case "update":
 		handleUpdate()
+	case "config":
+		handleConfig(cfg, args)
 	case "help", "h", "--help", "-h":
 		printUsage()
 	default:
@@ -143,45 +236,78 @@ func main() {
 	}
 }
 
-func parseFlags(args []string) map[string]bool {
+func parseFlags(args []string) (map[string]bool, map[string]string) {
 	flags := make(map[string]bool)
-	for _, arg := range args {
+	flagValues := make(map[string]string)
+	
+	for i, arg := range args {
 		if strings.HasPrefix(arg, "--") {
 			flag := strings.TrimPrefix(arg, "--")
-			flags[flag] = true
+			// Check if flag has a value (--flag=value or --flag value)
+			if strings.Contains(flag, "=") {
+				parts := strings.SplitN(flag, "=", 2)
+				flagValues[parts[0]] = parts[1]
+				flags[parts[0]] = true
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				// Next arg might be a value
+				flagValues[flag] = args[i+1]
+				flags[flag] = true
+			} else {
+				flags[flag] = true
+			}
 		} else if strings.HasPrefix(arg, "-") {
+			// Handle short flags like -y, -v
 			flag := strings.TrimPrefix(arg, "-")
-			flags[flag] = true
+			for _, char := range flag {
+				flags[string(char)] = true
+			}
 		}
 	}
-	return flags
+	return flags, flagValues
 }
 
 func printUsage() {
 	fmt.Println("Usage: zap <command> [flags]")
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  ports     Scan and free up ports")
-	fmt.Println("  cleanup   Remove stale dependency/cache folders")
-	fmt.Println("  version   Display version information")
-	fmt.Println("  update    Update zap to the latest version")
+	fmt.Println("  ports, port    Scan and free up ports")
+	fmt.Println("  cleanup, clean  Remove stale dependency/cache folders")
+	fmt.Println("  version, v     Show version")
+	fmt.Println("  update         Update to latest version")
+	fmt.Println("  config         Manage configuration")
+	fmt.Println("  help, h        Show this help message")
 	fmt.Println()
 	fmt.Println("Flags:")
-	fmt.Println("  --yes, -y        Execute without confirmation where safe")
-	fmt.Println("  --dry-run        Show planned actions without making changes")
-	fmt.Println("  --verbose, -v    Show detailed progress and information")
+	fmt.Println("  --yes, -y           Execute without confirmation (safe actions only)")
+	fmt.Println("  --dry-run           Preview actions without making changes")
+	fmt.Println("  --verbose, -v       Show detailed information")
+	fmt.Println("  --json, -j          Output in JSON format (for scripting)")
+	fmt.Println("  --ports=<range>     Custom port range (e.g., 3000-3010,8080,9000-9005)")
 	fmt.Println()
 	fmt.Println("Examples:")
-	fmt.Println("  zap ports         # Free up ports")
-	fmt.Println("  zap ports --yes   # Free up ports without prompts")
-	fmt.Println("  zap cleanup       # Clean up stale directories")
-	fmt.Println("  zap update        # Update to latest version")
+	fmt.Println("  zap ports --ports=3000-3010,8080")
+	fmt.Println("  zap ports --yes")
+	fmt.Println("  zap cleanup --dry-run")
+	fmt.Println("  zap version --json")
+	fmt.Println("  zap config set protected_ports 5432,6379")
 }
 
-func handlePorts(cfg *config.Config, yes, dryRun bool) {
+func handlePorts(cfg *config.Config, yes, dryRun, jsonOutput bool, flagValues map[string]string) {
+	// Check for custom port range
+	portsToScan := commonDevPorts
+	if portsStr, ok := flagValues["ports"]; ok {
+		parsedPorts, err := parsePortRange(portsStr)
+		if err != nil {
+			log.Log(log.FAIL, "Invalid port range: %v", err)
+			os.Exit(1)
+		}
+		portsToScan = parsedPorts
+		log.VerboseLog("scanning custom port range: %v", portsToScan)
+	}
+
 	log.Log(log.SCAN, "checking commonly used development ports")
 	if log.Verbose {
-		log.VerboseLog("scanning ports: %v", getCommonPorts())
+		log.VerboseLog("scanning ports: %v", portsToScan)
 	}
 
 	// Check if required tools are available
@@ -190,14 +316,18 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 		os.Exit(1)
 	}
 
-	processes, err := ports.ScanPorts()
+	processes, err := ports.ScanPortsRange(portsToScan)
 	if err != nil {
 		log.Log(log.FAIL, "Failed to scan ports: %v", err)
 		os.Exit(1)
 	}
 
 	if len(processes) == 0 {
-		log.Log(log.OK, "no processes found on common development ports")
+		if jsonOutput {
+			fmt.Println(`{"processes":[],"total":0,"safe":0,"infrastructure":0,"skipped":0}`)
+		} else {
+			log.Log(log.OK, "no processes found on common development ports")
+		}
 		return
 	}
 
@@ -370,7 +500,7 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 	}
 }
 
-func handleCleanup(cfg *config.Config, yes, dryRun bool) {
+func handleCleanup(cfg *config.Config, yes, dryRun, jsonOutput bool, flagValues map[string]string) {
 	// Validate config
 	if cfg.MaxAgeDaysForCleanup <= 0 {
 		log.Log(log.FAIL, "Invalid configuration: max_age_days_for_cleanup must be greater than 0")
@@ -726,7 +856,7 @@ func handleUpdate() {
 	// Install latest version with version injection
 	// go install doesn't support ldflags, so we need to build manually
 	log.Log(log.INFO, "downloading and installing latest version...")
-	
+
 	// Only try git clone if we have a valid tag (not "main")
 	if latestTag != "" && latestTag != "main" {
 		// Create temp directory for cloning
@@ -743,7 +873,7 @@ func handleUpdate() {
 		cloneCmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth", "1", "--branch", latestTag, "https://github.com/hugoev/zap.git", tempDir)
 		cloneOutput, cloneErr := cloneCmd.CombinedOutput()
 		cloneCancel()
-		
+
 		if cloneErr != nil {
 			log.VerboseLog("failed to clone with tag, trying full clone: %s", string(cloneOutput))
 			// Fallback: clone main and checkout tag
@@ -751,7 +881,7 @@ func handleUpdate() {
 			cloneCmd2 := exec.CommandContext(cloneCtx2, "git", "clone", "--depth", "1", "https://github.com/hugoev/zap.git", tempDir)
 			cloneOutput2, cloneErr2 := cloneCmd2.CombinedOutput()
 			cloneCancel2()
-			
+
 			if cloneErr2 != nil {
 				log.Log(log.FAIL, "failed to clone repository: %s", string(cloneOutput2))
 				log.Log(log.INFO, "falling back to go install (version may show as 'dev')")
@@ -795,7 +925,7 @@ func handleUpdate() {
 		log.VerboseLog("building with version injection...")
 		buildCtx, buildCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer buildCancel()
-		
+
 		versionStr := strings.TrimPrefix(latestTag, "v") // Remove 'v' prefix
 		commitCtx, commitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		commitCmd := exec.CommandContext(commitCtx, "git", "-C", tempDir, "rev-parse", "--short", "HEAD")
@@ -805,12 +935,12 @@ func handleUpdate() {
 		if commitHash == "" {
 			commitHash = "unknown"
 		}
-		
+
 		dateStr := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-		
+
 		ldflags := fmt.Sprintf("-X github.com/hugoev/zap/internal/version.Version=%s -X github.com/hugoev/zap/internal/version.Commit=%s -X github.com/hugoev/zap/internal/version.Date=%s",
 			versionStr, commitHash, dateStr)
-		
+
 		log.VerboseLog("building with version: %s, commit: %s", versionStr, commitHash)
 		buildCmd := exec.CommandContext(buildCtx, "go", "build", "-ldflags", ldflags, "-o", expectedZapPath, "./cmd/zap")
 		buildCmd.Dir = tempDir
@@ -818,7 +948,7 @@ func handleUpdate() {
 		buildCmd.Stderr = os.Stderr
 		buildErr := buildCmd.Run()
 		buildCancel()
-		
+
 		if buildErr != nil {
 			log.Log(log.FAIL, "failed to build update: %v", buildErr)
 			log.Log(log.INFO, "falling back to go install (version may show as 'dev')")
