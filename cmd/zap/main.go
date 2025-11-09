@@ -181,7 +181,9 @@ func printUsage() {
 
 func handlePorts(cfg *config.Config, yes, dryRun bool) {
 	log.Log(log.SCAN, "checking commonly used development ports")
-	log.VerboseLog("scanning ports: %v", getCommonPorts())
+	if log.Verbose {
+		log.VerboseLog("scanning ports: %v", getCommonPorts())
+	}
 
 	// Check if required tools are available
 	if _, err := exec.LookPath("lsof"); err != nil {
@@ -229,15 +231,21 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 			continue
 		}
 
-		// Format process info
+		// Format process info - always show command and working directory
 		runtimeStr := formatRuntime(proc.Runtime)
 		procInfo := fmt.Sprintf(":%d PID %d (%s) [%s]", proc.Port, proc.PID, proc.Name, runtimeStr)
-		if log.Verbose {
+		
+		// Always show command preview so user knows what they're killing
+		if proc.Cmd != "" {
 			cmdPreview := truncateString(proc.Cmd, 60)
 			procInfo += fmt.Sprintf(" - %s", cmdPreview)
-			if proc.WorkingDir != "" {
-				procInfo += fmt.Sprintf(" [%s]", truncateString(proc.WorkingDir, 40))
-			}
+		} else {
+			procInfo += " - (command not available)"
+		}
+		
+		// Always show working directory
+		if proc.WorkingDir != "" {
+			procInfo += fmt.Sprintf(" [%s]", truncateString(proc.WorkingDir, 40))
 		}
 
 		if ports.IsInfrastructureProcess(proc) {
