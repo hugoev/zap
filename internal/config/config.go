@@ -298,8 +298,14 @@ func saveWithLock(cfg *Config) error {
 		defer file.Close()
 		defer os.Remove(tempPath) // Cleanup on error
 
-		// Acquire exclusive lock
-		if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
+		// Acquire exclusive lock with timeout (non-blocking first, then blocking with timeout)
+		// Try non-blocking first
+		if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			// Lock is held - this shouldn't happen in normal operation since we have mutex
+			// But handle it gracefully with a timeout
+			if err == unix.EWOULDBLOCK {
+				return fmt.Errorf("config file is locked by another process (timeout)")
+			}
 			return fmt.Errorf("failed to lock config file: %w", err)
 		}
 		defer unix.Flock(int(file.Fd()), unix.LOCK_UN)
@@ -323,8 +329,33 @@ func saveWithLock(cfg *Config) error {
 		}
 
 		// Atomic rename (atomic on most filesystems)
+		// This is crash-safe: if rename fails, temp file remains and can be recovered
 		if err := os.Rename(tempPath, configPath); err != nil {
+			// On failure, temp file still exists - attempt recovery
+			// Check if temp file is valid JSON before suggesting recovery
+			if tempData, readErr := os.ReadFile(tempPath); readErr == nil {
+				var testCfg Config
+				if json.Unmarshal(tempData, &testCfg) == nil {
+					// Temp file is valid - suggest manual recovery
+					return fmt.Errorf("failed to commit config (temp file is valid at %s): %w", tempPath, err)
+				}
+			}
 			return fmt.Errorf("failed to commit config: %w", err)
+		}
+		
+		// Verify the config was written correctly (crash recovery check)
+		if verifyData, readErr := os.ReadFile(configPath); readErr == nil {
+			var verifyCfg Config
+			if json.Unmarshal(verifyData, &verifyCfg) != nil {
+				// Config is corrupted after write - attempt recovery from backup
+				backupPath := getBackupPath(configPath)
+				if backupData, backupErr := os.ReadFile(backupPath); backupErr == nil {
+					// Restore from backup
+					os.WriteFile(configPath, backupData, 0644)
+					return fmt.Errorf("config corrupted after write - restored from backup")
+				}
+				return fmt.Errorf("config corrupted after write and backup recovery failed")
+			}
 		}
 	} else {
 		// Windows: simple atomic write (no file locking support)

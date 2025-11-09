@@ -27,8 +27,16 @@ func AcquireLock() (*InstanceLock, error) {
 
 	lockPath := filepath.Join(homeDir, ".config", "zap", ".lock")
 
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+	// Check if lock directory is on a network mount (could cause issues)
+	// We'll handle this gracefully by checking if we can create the directory
+	lockDir := filepath.Dir(lockPath)
+	if err := os.MkdirAll(lockDir, 0755); err != nil {
+		// Check if it's a network mount error
+		if pathErr, ok := err.(*os.PathError); ok {
+			if pathErr.Err == syscall.ENOTCONN || pathErr.Err == syscall.EHOSTUNREACH || pathErr.Err == syscall.ETIMEDOUT {
+				return nil, fmt.Errorf("lock directory is on a disconnected network mount: %w", err)
+			}
+		}
 		return nil, fmt.Errorf("failed to create lock directory: %w", err)
 	}
 

@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -336,6 +337,8 @@ func printUsage() {
 }
 
 func handlePorts(ctx context.Context, cfg *config.Config, yes, dryRun, jsonOutput bool, flagValues map[string]string) {
+	atomic.AddInt32(&operationActive, 1)
+	defer atomic.AddInt32(&operationActive, -1)
 	// Check for custom port range
 	portsToScan := commonDevPorts
 	if portsStr, ok := flagValues["ports"]; ok {
@@ -564,6 +567,8 @@ func handlePorts(ctx context.Context, cfg *config.Config, yes, dryRun, jsonOutpu
 }
 
 func handleCleanup(cfg *config.Config, yes, dryRun, jsonOutput bool, flagValues map[string]string) {
+	atomic.AddInt32(&operationActive, 1)
+	defer atomic.AddInt32(&operationActive, -1)
 	// Validate config
 	if cfg.MaxAgeDaysForCleanup <= 0 {
 		log.Log(log.FAIL, "Invalid configuration: max_age_days_for_cleanup must be greater than 0")
@@ -927,6 +932,52 @@ func shellEscape(s string) string {
 }
 
 // copyFile copies a file from src to dst, preserving permissions
+// getBinaryArchitecture determines the architecture of a compiled binary
+func getBinaryArchitecture(binaryPath string) (string, error) {
+	if runtime.GOOS == "windows" {
+		// Windows: use file command or PE header parsing
+		// For now, assume it matches runtime.GOARCH if we can't determine
+		return runtime.GOARCH, nil
+	}
+
+	// Unix: use file command to determine architecture
+	cmd := exec.Command("file", binaryPath)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to run file command: %w", err)
+	}
+
+	fileOutput := strings.ToLower(string(output))
+	
+	// Parse architecture from file output
+	// Examples:
+	// "ELF 64-bit LSB executable, x86-64" -> "amd64"
+	// "Mach-O 64-bit executable arm64" -> "arm64"
+	// "ELF 64-bit LSB executable, ARM aarch64" -> "arm64"
+	
+	if strings.Contains(fileOutput, "x86-64") || strings.Contains(fileOutput, "x86_64") {
+		return "amd64", nil
+	}
+	if strings.Contains(fileOutput, "aarch64") || strings.Contains(fileOutput, "arm64") {
+		return "arm64", nil
+	}
+	if strings.Contains(fileOutput, "arm") && !strings.Contains(fileOutput, "arm64") {
+		return "arm", nil
+	}
+	if strings.Contains(fileOutput, "386") || strings.Contains(fileOutput, "i386") {
+		return "386", nil
+	}
+	if strings.Contains(fileOutput, "ppc64") {
+		return "ppc64", nil
+	}
+	if strings.Contains(fileOutput, "mips") {
+		return "mips", nil
+	}
+
+	// If we can't determine, return error
+	return "", fmt.Errorf("unable to determine architecture from file output: %s", fileOutput)
+}
+
 func copyFile(src, dst string) error {
 	sourceFile, err := os.Open(src)
 	if err != nil {
@@ -1035,7 +1086,17 @@ func findProjectDirectories(homeDir string) []string {
 	return paths
 }
 
+// isOperationActive checks if zap is currently performing a ports or cleanup operation
+// This prevents updates during active operations which could corrupt state
+var operationActive int32 // atomic counter for active operations
+
 func handleUpdate() {
+	// Check if any operations are active
+	if atomic.LoadInt32(&operationActive) > 0 {
+		log.Log(log.FAIL, "cannot update while operations are in progress")
+		log.Log(log.INFO, "please wait for current operation to complete")
+		os.Exit(1)
+	}
 	log.Log(log.SCAN, "checking for updates...")
 
 	// Check all required dependencies upfront with helpful messages
@@ -1317,6 +1378,19 @@ func handleUpdate() {
 			// Make the binary executable
 			os.Chmod(tempBinaryPath, 0755)
 			log.VerboseLog("built binary with version %s at %s", versionStr, tempBinaryPath)
+
+			// Verify architecture matches before proceeding
+			log.VerboseLog("verifying binary architecture...")
+			currentArch := runtime.GOARCH
+			binaryArch, archErr := getBinaryArchitecture(tempBinaryPath)
+			if archErr != nil {
+				log.VerboseLog("could not determine binary architecture: %v", archErr)
+			} else if binaryArch != currentArch {
+				os.Remove(tempBinaryPath)
+				log.Log(log.FAIL, "architecture mismatch: binary is %s, system is %s", binaryArch, currentArch)
+				log.Log(log.INFO, "update aborted - architecture mismatch")
+				os.Exit(1)
+			}
 
 			// Verify the new binary works before replacing the old one
 			log.VerboseLog("verifying new binary...")

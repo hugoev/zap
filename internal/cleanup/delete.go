@@ -85,6 +85,10 @@ func DeleteDirectory(path string) error {
 				// Even if checkNetworkMount doesn't error, the operation failed due to network
 				return fmt.Errorf("network mount disconnected during deletion: %s", path)
 			}
+			// Check for read-only filesystem (EROFS)
+			if pathErr.Err == syscall.EROFS {
+				return fmt.Errorf("filesystem is read-only: %s (cannot delete)", path)
+			}
 		}
 		
 		// Check if error is transient (file/directory busy, permission denied temporarily)

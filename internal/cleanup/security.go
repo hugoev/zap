@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -16,10 +17,38 @@ func validatePath(path string) error {
 		return fmt.Errorf("path cannot be empty")
 	}
 
+	// Check for null bytes (security risk)
+	if strings.Contains(path, "\x00") {
+		return fmt.Errorf("path contains null byte: %s", path)
+	}
+
+	// Check for invalid UTF-8 sequences
+	if !strings.Contains(path, "\x00") {
+		// Validate UTF-8 encoding
+		for i := 0; i < len(path); {
+			r, size := utf8.DecodeRuneInString(path[i:])
+			if r == utf8.RuneError && size == 1 {
+				return fmt.Errorf("path contains invalid UTF-8 sequence at position %d", i)
+			}
+			i += size
+		}
+	}
+
+	// Check path length limits (POSIX PATH_MAX is typically 4096, but be conservative)
+	const maxPathLen = 4096
+	if len(path) > maxPathLen {
+		return fmt.Errorf("path exceeds maximum length (%d): %s", maxPathLen, path)
+	}
+
 	// Resolve to absolute path
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
+	}
+
+	// Check resolved path length
+	if len(absPath) > maxPathLen {
+		return fmt.Errorf("resolved path exceeds maximum length (%d): %s", maxPathLen, absPath)
 	}
 
 	// Check for path traversal attempts

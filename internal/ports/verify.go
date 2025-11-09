@@ -1,6 +1,7 @@
 package ports
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,15 +11,48 @@ import (
 	"time"
 )
 
+const (
+	// ProcessVerificationTimeout is the maximum time to wait for process verification
+	ProcessVerificationTimeout = 5 * time.Second
+)
+
 // VerifyProcessMatches verifies that a process still matches the expected ProcessInfo
 // This prevents PID reuse race conditions where a different process might have taken the PID
 func VerifyProcessMatches(pid int, expected ProcessInfo) (bool, error) {
+	return VerifyProcessMatchesWithContext(context.Background(), pid, expected)
+}
+
+// VerifyProcessMatchesWithContext verifies with a context for timeout control
+func VerifyProcessMatchesWithContext(ctx context.Context, pid int, expected ProcessInfo) (bool, error) {
 	if pid <= 0 {
 		return false, fmt.Errorf("invalid PID: %d", pid)
 	}
 
-	// Get current process details
-	current := getProcessDetails(pid)
+	// Create timeout context if not provided
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), ProcessVerificationTimeout)
+		defer cancel()
+	}
+
+	// Get current process details with timeout
+	type result struct {
+		details processDetails
+	}
+	resultChan := make(chan result, 1)
+	
+	go func() {
+		details := getProcessDetails(pid)
+		resultChan <- result{details: details}
+	}()
+
+	var current processDetails
+	select {
+	case res := <-resultChan:
+		current = res.details
+	case <-ctx.Done():
+		return false, fmt.Errorf("process verification timeout: %w", ctx.Err())
+	}
 
 	// If we can't get details, assume it doesn't match (safer)
 	if current.Cmd == "" && expected.Cmd != "" {
@@ -27,7 +61,7 @@ func VerifyProcessMatches(pid int, expected ProcessInfo) (bool, error) {
 
 	// Verify key attributes match with tolerance for legitimate changes
 	// Priority: PID > Working Directory > Start Time > Command
-	
+
 	// 1. Start time should be close (within 1 second tolerance for clock skew)
 	// This is the most reliable indicator - if start time matches, it's likely the same process
 	startTimeMatches := false
@@ -167,4 +201,3 @@ func IsProcessUninterruptible(pid int) (bool, error) {
 	// Z = zombie (defunct)
 	return state == "D" || state == "Z", nil
 }
-

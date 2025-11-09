@@ -175,19 +175,20 @@ func getProcessesOnPort(ctx context.Context, port int) ([]ProcessInfo, error) {
 
 	var output []byte
 	var err error
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Use provided context or create timeout context
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	// Method 1: lsof (macOS, most Linux)
 	if lsofPath, err := exec.LookPath("lsof"); err == nil {
-		cmd := exec.CommandContext(ctx, lsofPath, "-i", fmt.Sprintf(":%d", port), "-sTCP:LISTEN", "-P", "-n")
+		cmd := exec.CommandContext(timeoutCtx, lsofPath, "-i", fmt.Sprintf(":%d", port), "-sTCP:LISTEN", "-P", "-n")
 		output, err = cmd.Output()
 		if err == nil {
 			// Success with lsof
 			return parseLsofOutput(output, port)
 		}
 		// If timeout, return error
-		if ctx.Err() == context.DeadlineExceeded {
+		if timeoutCtx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("timeout scanning port %d", port)
 		}
 		// Exit code 1 means no process found (normal)

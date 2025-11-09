@@ -131,7 +131,7 @@ func KillProcessGroup(pid int) error {
 	if adaptiveTimeout > maxTimeout {
 		adaptiveTimeout = maxTimeout
 	}
-	
+
 	// Minimum timeout of 3 seconds
 	if adaptiveTimeout < GracefulTerminationTimeout {
 		adaptiveTimeout = GracefulTerminationTimeout
@@ -188,7 +188,7 @@ func countProcessGroupSize(pgid int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	
+
 	// Count non-empty lines (each line is a PID)
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	count := 0
