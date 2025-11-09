@@ -108,19 +108,14 @@ git push
 
 ## Manual Version Override
 
-If you need to manually set a version, just update `internal/version/version.go`:
+If you need to manually set a specific version, create a git tag:
 
-```go
-const Version = "0.5.0"  // Your desired version
-```
-
-Then commit and push:
 ```bash
-git commit -m "chore: bump version to 0.5.0"
-git push
+git tag -a v0.5.0 -m "Release v0.5.0"
+git push origin v0.5.0
 ```
 
-**Manual version changes take precedence** - the workflow will use your version instead of auto-bumping.
+The version will automatically be derived from this tag in all builds. **No file edits needed!**
 
 ## Best Practices
 
@@ -170,8 +165,10 @@ git push
    - Detects `.go` file changes
    - Analyzes commit messages
    - Determines bump type (major/minor/patch)
-   - Updates version in `internal/version/version.go`
-   - Creates git tag and GitHub release
+   - Calculates new version from latest git tag
+   - Creates git tag automatically
+   - Creates GitHub release
+   - Version is derived from tags at build time (no file updates)
 
 That's it! No manual version management needed.
 

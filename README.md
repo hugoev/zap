@@ -58,8 +58,11 @@ cd ~/path/to/zap  # or wherever you cloned it
 # Pull the latest changes
 git pull
 
-# Reinstall the updated version
-go install ./cmd/zap
+# Reinstall the updated version (with version from git tags)
+go install -ldflags "-X github.com/hugoev/zap/internal/version.Version=$(git describe --tags --always)" ./cmd/zap
+
+# Or use Makefile
+make install
 
 # Verify the update
 zap version
