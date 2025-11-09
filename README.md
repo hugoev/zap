@@ -36,7 +36,8 @@ zap solves this by automatically detecting and terminating development-related p
 
 - Searches for large dependency and cache directories such as:
   - node_modules, .venv, .cache, .gradle, .mypy_cache
-  - Go build cache directories in $GOMODCACHE
+  - **pycache**, .pytest_cache, target, dist, build
+  - .next, .turbo, .nuxt, .output
 - Presents size summaries before removing anything
 - Allows exclusion of specific directories
 - Automatically remembers user exclusions
@@ -48,13 +49,13 @@ zap uses structured, professional logging:
 
 ```
 SCAN     checking commonly used development ports
-FOUND    :3000 PID 54321 (node)
-FOUND    :5173 PID 55222 (vite)
+FOUND    :3000 PID 54321 (node) [5m]
+FOUND    :5173 PID 55222 (vite) [2h]
 SKIP     :5432 PID 30120 (postgres) protected
-ACTION   terminate processes [54321, 55222]? (y/N): y
+ACTION   terminate 2 safe dev server process(es) [54321, 55222]? (y/N): y
 STOP     PID 54321
 STOP     PID 55222
-OK       ports freed
+STATS    terminated 2 process(es), 1 skipped
 ```
 
 ### Log Format:
@@ -69,6 +70,8 @@ OK       ports freed
 | DELETE | Directory removal event               |
 | OK     | Successful completion                 |
 | FAIL   | Operation error                       |
+| INFO   | Detailed information (verbose mode)   |
+| STATS  | Summary statistics                    |
 
 Colors are used to improve clarity (ANSI-compatible) but never required.
 
@@ -112,13 +115,13 @@ zap always explains its actions before executing irreversible operations unless 
 | ------------- | ------------------------------------------------------------- |
 | `zap ports`   | Scan and terminate orphaned or conflict-causing dev processes |
 | `zap cleanup` | Remove stale dependency/cache folders and reclaim disk space  |
-| `zap version` | Display version and build metadata                            |
+| `git` | Display version and build metadata                            |
 
 Optional flags:
 
-- `--yes` execute without confirmation where safe
+- `--yes, -y` execute without confirmation where safe
 - `--dry-run` show planned actions without making changes
-- `--config` specify alternate config path
+- `--verbose, -v` show detailed progress and information
 
 ## Goals
 
