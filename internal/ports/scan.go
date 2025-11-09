@@ -6,8 +6,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -54,14 +56,23 @@ var commonDevPorts = []int{
 	6000, 6001, // Additional dev servers
 }
 
-func ScanPorts() ([]ProcessInfo, error) {
-	return ScanPortsRange(commonDevPorts)
+func ScanPorts(ctx context.Context) ([]ProcessInfo, error) {
+	return ScanPortsRange(ctx, commonDevPorts)
 }
 
 // ScanPortsRange scans a specific list of ports (allows custom port ranges)
-func ScanPortsRange(ports []int) ([]ProcessInfo, error) {
+func ScanPortsRange(ctx context.Context, ports []int) ([]ProcessInfo, error) {
 	var processes []ProcessInfo
 	var scanErrors []error
+
+	// Limit concurrent goroutines to prevent resource exhaustion
+	maxConcurrency := runtime.NumCPU() * 2
+	if maxConcurrency > 20 {
+		maxConcurrency = 20 // Cap at 20
+	}
+	if maxConcurrency < 1 {
+		maxConcurrency = 1
+	}
 
 	// Use goroutines for parallel scanning (faster on multi-core systems)
 	type result struct {
@@ -70,20 +81,65 @@ func ScanPortsRange(ports []int) ([]ProcessInfo, error) {
 		port  int
 	}
 
+	semaphore := make(chan struct{}, maxConcurrency)
 	results := make(chan result, len(ports))
+	var wg sync.WaitGroup
 
-	// Launch parallel scans
+	// Launch parallel scans with resource limits
 	for _, port := range ports {
+		// Check for cancellation
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		wg.Add(1)
 		go func(p int) {
-			procs, err := getProcessesOnPort(p)
+			defer wg.Done()
+
+			// Acquire semaphore (limit concurrency)
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			// Check for cancellation before scanning
+			select {
+			case <-ctx.Done():
+				results <- result{procs: nil, err: ctx.Err(), port: p}
+				return
+			default:
+			}
+
+			procs, err := getProcessesOnPort(ctx, p)
 			results <- result{procs: procs, err: err, port: p}
 		}(port)
 	}
 
+	// Wait for all goroutines with timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	// Wait for completion or cancellation
+	select {
+	case <-done:
+		// All completed
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(30 * time.Second):
+		return nil, fmt.Errorf("scan timeout exceeded (30s)")
+	}
+
 	// Collect results
-	for i := 0; i < len(ports); i++ {
-		res := <-results
+	close(results)
+	for res := range results {
 		if res.err != nil {
+			// Skip cancellation errors (they're expected)
+			if res.err == context.Canceled || res.err == context.DeadlineExceeded {
+				continue
+			}
 			// Log error but continue scanning other ports
 			scanErrors = append(scanErrors, fmt.Errorf("port %d: %w", res.port, res.err))
 			continue
@@ -104,7 +160,7 @@ func ScanPortsRange(ports []int) ([]ProcessInfo, error) {
 	return processes, nil
 }
 
-func getProcessesOnPort(port int) ([]ProcessInfo, error) {
+func getProcessesOnPort(ctx context.Context, port int) ([]ProcessInfo, error) {
 	var processes []ProcessInfo
 
 	// Validate port number

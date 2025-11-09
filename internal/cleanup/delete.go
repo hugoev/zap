@@ -14,6 +14,11 @@ const (
 )
 
 func DeleteDirectory(path string) error {
+	// Validate path security first
+	if err := validatePath(path); err != nil {
+		return fmt.Errorf("path validation failed: %w", err)
+	}
+
 	// Validate path exists before attempting deletion
 	info, err := os.Stat(path)
 	if err != nil {
@@ -25,6 +30,11 @@ func DeleteDirectory(path string) error {
 
 	if !info.IsDir() {
 		return fmt.Errorf("path is not a directory: %s", path)
+	}
+
+	// Check disk space before deletion (safety check)
+	if err := checkDiskSpace(path, info.Size()); err != nil {
+		return fmt.Errorf("disk space check failed: %w", err)
 	}
 
 	// Attempt deletion

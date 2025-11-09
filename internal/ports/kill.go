@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -23,6 +26,12 @@ func KillProcess(pid int) error {
 		return fmt.Errorf("process %d is not running", pid)
 	}
 
+	// Try to kill process group first (handles child processes)
+	if err := KillProcessGroup(pid); err == nil {
+		return nil // Successfully killed process group
+	}
+
+	// Fallback to single process if process group kill fails
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return fmt.Errorf("process %d not found: %w", pid, err)
@@ -53,6 +62,72 @@ func KillProcess(pid int) error {
 	}
 
 	return nil
+}
+
+// KillProcessGroup kills the entire process group, including child processes
+func KillProcessGroup(pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("invalid PID: %d", pid)
+	}
+
+	// Get process group ID
+	var pgid int
+	var err error
+
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		// Use unix.Getpgid for Unix systems
+		pgid, err = unix.Getpgid(pid)
+		if err != nil {
+			// If we can't get PGID, fall back to single process
+			return fmt.Errorf("failed to get process group: %w", err)
+		}
+	} else {
+		// Fallback for other systems
+		return fmt.Errorf("process groups not supported on this platform")
+	}
+
+	// Send SIGTERM to entire process group (negative PID means process group)
+	err = unix.Kill(-pgid, syscall.SIGTERM)
+	if err != nil {
+		// If process group doesn't exist, try single process
+		if err == unix.ESRCH {
+			return fmt.Errorf("process group not found")
+		}
+		return fmt.Errorf("failed to signal process group: %w", err)
+	}
+
+	// Wait for graceful termination
+	deadline := time.Now().Add(GracefulTerminationTimeout)
+	for time.Now().Before(deadline) {
+		if !isProcessGroupRunning(pgid) {
+			return nil // Process group terminated gracefully
+		}
+		time.Sleep(ProcessCheckInterval)
+	}
+
+	// Force kill entire group if still running
+	if isProcessGroupRunning(pgid) {
+		err = unix.Kill(-pgid, syscall.SIGKILL)
+		if err != nil && err != unix.ESRCH {
+			return fmt.Errorf("failed to force kill process group: %w", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+		if isProcessGroupRunning(pgid) {
+			return fmt.Errorf("process group %d did not terminate after SIGKILL", pgid)
+		}
+	}
+
+	return nil
+}
+
+func isProcessGroupRunning(pgid int) bool {
+	// Check if any process in the group is still running
+	cmd := exec.Command("ps", "-o", "pid=", "-g", strconv.Itoa(pgid))
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(output))) > 0
 }
 
 func KillProcessForce(pid int) error {

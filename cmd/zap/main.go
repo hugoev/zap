@@ -6,15 +6,18 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/hugoev/zap/internal/cleanup"
 	"github.com/hugoev/zap/internal/config"
+	"github.com/hugoev/zap/internal/lock"
 	"github.com/hugoev/zap/internal/log"
 	"github.com/hugoev/zap/internal/ports"
 	"github.com/hugoev/zap/internal/version"
@@ -188,6 +191,14 @@ func extractVersionFromOutput(output string) (string, error) {
 }
 
 func main() {
+	// Acquire single-instance lock
+	instanceLock, err := lock.AcquireLock()
+	if err != nil {
+		log.Log(log.FAIL, err.Error())
+		os.Exit(1)
+	}
+	defer instanceLock.Release()
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
@@ -201,6 +212,19 @@ func main() {
 		log.Log(log.FAIL, "Failed to load config: %v", err)
 		os.Exit(1)
 	}
+
+	// Create cancellable context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle signals for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigChan
+		log.Log(log.INFO, "received signal %v, shutting down gracefully...", sig)
+		cancel()
+	}()
 
 	// Check if zap is in PATH on first run (only for non-version/update commands)
 	if command != "version" && command != "update" && command != "help" && command != "h" && command != "--help" && command != "-h" {
@@ -232,7 +256,7 @@ func main() {
 
 	switch command {
 	case "ports", "port":
-		handlePorts(cfg, yes, dryRun, jsonOutput, flagValues)
+		handlePorts(ctx, cfg, yes, dryRun, jsonOutput, flagValues)
 	case "cleanup", "clean":
 		handleCleanup(cfg, yes, dryRun, jsonOutput, flagValues)
 	case "version", "v":
@@ -310,7 +334,7 @@ func printUsage() {
 	fmt.Println("  zap config set protected_ports 5432,6379")
 }
 
-func handlePorts(cfg *config.Config, yes, dryRun, jsonOutput bool, flagValues map[string]string) {
+func handlePorts(ctx context.Context, cfg *config.Config, yes, dryRun, jsonOutput bool, flagValues map[string]string) {
 	// Check for custom port range
 	portsToScan := commonDevPorts
 	if portsStr, ok := flagValues["ports"]; ok {
@@ -334,8 +358,12 @@ func handlePorts(cfg *config.Config, yes, dryRun, jsonOutput bool, flagValues ma
 		os.Exit(1)
 	}
 
-	processes, err := ports.ScanPortsRange(portsToScan)
+	processes, err := ports.ScanPortsRange(ctx, portsToScan)
 	if err != nil {
+		if err == context.Canceled {
+			log.Log(log.INFO, "operation cancelled")
+			os.Exit(130) // Standard exit code for SIGINT
+		}
 		log.Log(log.FAIL, "Failed to scan ports: %v", err)
 		os.Exit(1)
 	}
@@ -824,7 +852,7 @@ func setupPath(goBinPath string) error {
 
 	// Add to config file
 	pathLine := fmt.Sprintf("\nexport PATH=\"$PATH:%s\"\n", goBinPath)
-	
+
 	// Read existing file
 	existingContent, err := os.ReadFile(configFile)
 	if err != nil && !os.IsNotExist(err) {
@@ -852,7 +880,7 @@ func setupPath(goBinPath string) error {
 
 	log.Log(log.OK, "added %s to PATH in %s", goBinPath, configFile)
 	log.Log(log.INFO, "run 'source %s' or restart your terminal to use zap", configFile)
-	
+
 	return nil
 }
 
@@ -864,24 +892,46 @@ func pathAlreadyInConfig(configFile, path string) bool {
 	return strings.Contains(string(content), path)
 }
 
+func validatePath(path string) error {
+	if path == "" {
+		return fmt.Errorf("path cannot be empty")
+	}
+	
+	// Basic validation - ensure no shell injection characters
+	if strings.ContainsAny(path, "\n\r\t$`\"'\\") {
+		return fmt.Errorf("path contains invalid characters")
+	}
+	
+	return nil
+}
+
+func shellEscape(s string) string {
+	// Remove any shell metacharacters and wrap in single quotes
+	escaped := strings.ReplaceAll(s, "'", "'\"'\"'")
+	return "'" + escaped + "'"
+}
+
 func showPathInstructions(goBinPath, shellName string) {
 	fmt.Println()
 	log.Log(log.INFO, "to add %s to your PATH manually:", goBinPath)
 	
+	// Escape path for display
+	escapedPath := shellEscape(goBinPath)
+	
 	switch shellName {
 	case "bash":
 		if runtime.GOOS == "darwin" {
-			log.Log(log.INFO, "  echo 'export PATH=\"$PATH:%s\"' >> ~/.bash_profile", goBinPath)
+			log.Log(log.INFO, "  echo 'export PATH=\"$PATH:%s\"' >> ~/.bash_profile", escapedPath)
 			log.Log(log.INFO, "  source ~/.bash_profile")
 		} else {
-			log.Log(log.INFO, "  echo 'export PATH=\"$PATH:%s\"' >> ~/.bashrc", goBinPath)
+			log.Log(log.INFO, "  echo 'export PATH=\"$PATH:%s\"' >> ~/.bashrc", escapedPath)
 			log.Log(log.INFO, "  source ~/.bashrc")
 		}
 	case "zsh":
-		log.Log(log.INFO, "  echo 'export PATH=\"$PATH:%s\"' >> ~/.zshrc", goBinPath)
+		log.Log(log.INFO, "  echo 'export PATH=\"$PATH:%s\"' >> ~/.zshrc", escapedPath)
 		log.Log(log.INFO, "  source ~/.zshrc")
 	case "fish":
-		log.Log(log.INFO, "  echo 'set -gx PATH $PATH %s' >> ~/.config/fish/config.fish", goBinPath)
+		log.Log(log.INFO, "  echo 'set -gx PATH $PATH %s' >> ~/.config/fish/config.fish", escapedPath)
 		log.Log(log.INFO, "  source ~/.config/fish/config.fish")
 	default:
 		log.Log(log.INFO, "  add %s to your PATH in your shell configuration file", goBinPath)
