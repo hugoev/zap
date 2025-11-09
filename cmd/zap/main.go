@@ -268,7 +268,7 @@ func main() {
 			fmt.Printf("zap version %s\n", version.Get())
 		}
 	case "update":
-		handleUpdate()
+		handleUpdate(instanceLock)
 	case "config":
 		handleConfig(cfg, args)
 	case "help", "h", "--help", "-h":
@@ -948,13 +948,13 @@ func getBinaryArchitecture(binaryPath string) (string, error) {
 	}
 
 	fileOutput := strings.ToLower(string(output))
-	
+
 	// Parse architecture from file output
 	// Examples:
 	// "ELF 64-bit LSB executable, x86-64" -> "amd64"
 	// "Mach-O 64-bit executable arm64" -> "arm64"
 	// "ELF 64-bit LSB executable, ARM aarch64" -> "arm64"
-	
+
 	if strings.Contains(fileOutput, "x86-64") || strings.Contains(fileOutput, "x86_64") {
 		return "amd64", nil
 	}
@@ -1090,7 +1090,7 @@ func findProjectDirectories(homeDir string) []string {
 // This prevents updates during active operations which could corrupt state
 var operationActive int32 // atomic counter for active operations
 
-func handleUpdate() {
+func handleUpdate(instanceLock *lock.InstanceLock) {
 	// Check if any operations are active
 	if atomic.LoadInt32(&operationActive) > 0 {
 		log.Log(log.FAIL, "cannot update while operations are in progress")
@@ -1393,11 +1393,31 @@ func handleUpdate() {
 			}
 
 			// Verify the new binary works before replacing the old one
+			// Temporarily release the lock so the new binary can acquire it during verification
 			log.VerboseLog("verifying new binary...")
+			if instanceLock != nil {
+				log.VerboseLog("temporarily releasing lock for verification...")
+				instanceLock.Release()
+			}
+			
 			verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			verifyCmd := exec.CommandContext(verifyCtx, tempBinaryPath, "version")
 			verifyOutput, verifyErr := verifyCmd.Output()
 			verifyCancel()
+			
+			// Re-acquire the lock immediately after verification
+			if instanceLock != nil {
+				log.VerboseLog("re-acquiring lock after verification...")
+				var reacquireErr error
+				instanceLock, reacquireErr = lock.AcquireLock()
+				if reacquireErr != nil {
+					// Couldn't re-acquire lock - another instance might have started
+					os.Remove(tempBinaryPath)
+					log.Log(log.FAIL, "failed to re-acquire lock after verification: %v", reacquireErr)
+					log.Log(log.INFO, "update aborted - another instance may have started")
+					os.Exit(1)
+				}
+			}
 
 			if verifyErr != nil {
 				// New binary is corrupted or doesn't work - don't replace
@@ -1442,11 +1462,28 @@ func handleUpdate() {
 			}
 
 			// Verify the replaced binary still works
+			// Temporarily release lock for final verification
 			log.VerboseLog("verifying replaced binary...")
+			if instanceLock != nil {
+				log.VerboseLog("temporarily releasing lock for final verification...")
+				instanceLock.Release()
+			}
+			
 			finalVerifyCtx, finalVerifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			finalVerifyCmd := exec.CommandContext(finalVerifyCtx, expectedZapPath, "version")
 			finalVerifyOutput, finalVerifyErr := finalVerifyCmd.Output()
 			finalVerifyCancel()
+			
+			// Re-acquire lock after final verification
+			if instanceLock != nil {
+				log.VerboseLog("re-acquiring lock after final verification...")
+				var reacquireErr error
+				instanceLock, reacquireErr = lock.AcquireLock()
+				if reacquireErr != nil {
+					log.Log(log.INFO, "warning: could not re-acquire lock after final verification (another instance may have started)")
+					// Don't fail - update is complete
+				}
+			}
 
 			if finalVerifyErr != nil {
 				// Replacement corrupted the binary - restore from backup

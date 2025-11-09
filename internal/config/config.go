@@ -342,7 +342,7 @@ func saveWithLock(cfg *Config) error {
 			}
 			return fmt.Errorf("failed to commit config: %w", err)
 		}
-		
+
 		// Verify the config was written correctly (crash recovery check)
 		if verifyData, readErr := os.ReadFile(configPath); readErr == nil {
 			var verifyCfg Config

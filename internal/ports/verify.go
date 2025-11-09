@@ -40,7 +40,7 @@ func VerifyProcessMatchesWithContext(ctx context.Context, pid int, expected Proc
 		details processDetails
 	}
 	resultChan := make(chan result, 1)
-	
+
 	go func() {
 		details := getProcessDetails(pid)
 		resultChan <- result{details: details}
