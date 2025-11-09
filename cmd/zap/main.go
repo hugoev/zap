@@ -202,6 +202,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Check if zap is in PATH on first run (only for non-version/update commands)
+	if command != "version" && command != "update" && command != "help" && command != "h" && command != "--help" && command != "-h" {
+		if _, err := exec.LookPath("zap"); err != nil {
+			// zap not found in PATH, but we're running it, so check if we should set up PATH
+			goBinPath := determineGoBinPath()
+			expectedZapPath := filepath.Join(goBinPath, "zap")
+			// Check if binary exists in expected location but not in PATH
+			if _, err := os.Stat(expectedZapPath); err == nil {
+				if !strings.Contains(os.Getenv("PATH"), goBinPath) {
+					log.Log(log.INFO, "zap is installed but not in PATH")
+					if err := setupPath(goBinPath); err != nil {
+						log.VerboseLog("PATH setup failed: %v", err)
+					}
+				}
+			}
+		}
+	}
+
 	// Parse flags
 	flags, flagValues := parseFlags(args)
 	yes := flags["yes"] || flags["y"]
@@ -721,6 +739,156 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
+// determineGoBinPath determines where Go installs binaries
+func determineGoBinPath() string {
+	goBinPath := os.Getenv("GOBIN")
+	if goBinPath != "" {
+		return goBinPath
+	}
+	gopath := os.Getenv("GOPATH")
+	if gopath != "" {
+		return filepath.Join(gopath, "bin")
+	}
+	homeDir, _ := os.UserHomeDir()
+	return filepath.Join(homeDir, "go", "bin")
+}
+
+// setupPath automatically configures PATH for the user's shell
+func setupPath(goBinPath string) error {
+	// Check if already in PATH
+	currentPath := os.Getenv("PATH")
+	if strings.Contains(currentPath, goBinPath) {
+		return nil // Already configured
+	}
+
+	// Detect shell
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		// Fallback: try to detect from common shells
+		shell = "/bin/bash" // Default fallback
+	}
+
+	// Determine config file based on shell
+	var configFile string
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	shellName := filepath.Base(shell)
+	switch shellName {
+	case "bash":
+		// Try .bash_profile first (macOS), then .bashrc (Linux)
+		if runtime.GOOS == "darwin" {
+			configFile = filepath.Join(homeDir, ".bash_profile")
+		} else {
+			configFile = filepath.Join(homeDir, ".bashrc")
+		}
+		// Fallback to .bashrc if .bash_profile doesn't exist
+		if _, err := os.Stat(configFile); os.IsNotExist(err) {
+			configFile = filepath.Join(homeDir, ".bashrc")
+		}
+	case "zsh":
+		configFile = filepath.Join(homeDir, ".zshrc")
+	case "fish":
+		configDir := filepath.Join(homeDir, ".config", "fish")
+		os.MkdirAll(configDir, 0755)
+		configFile = filepath.Join(configDir, "config.fish")
+	default:
+		// Unknown shell, provide instructions instead
+		log.Log(log.INFO, "detected shell: %s (not automatically configurable)", shellName)
+		showPathInstructions(goBinPath, shellName)
+		return nil
+	}
+
+	// Check if path is already in config file
+	if pathAlreadyInConfig(configFile, goBinPath) {
+		log.Log(log.INFO, "PATH already configured in %s", configFile)
+		log.Log(log.INFO, "run 'source %s' or restart your terminal to use zap", configFile)
+		return nil
+	}
+
+	// Ask user if they want to add it
+	fmt.Println()
+	log.Log(log.ACTION, "add %s to PATH in %s? (y/N): ", goBinPath, configFile)
+	reader := bufio.NewReader(os.Stdin)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		return nil
+	}
+	response = strings.TrimSpace(strings.ToLower(response))
+	if response != "y" && response != "yes" {
+		showPathInstructions(goBinPath, shellName)
+		return nil
+	}
+
+	// Add to config file
+	pathLine := fmt.Sprintf("\nexport PATH=\"$PATH:%s\"\n", goBinPath)
+	
+	// Read existing file
+	existingContent, err := os.ReadFile(configFile)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read %s: %w", configFile, err)
+	}
+
+	// Check if it's already there (just in case)
+	if strings.Contains(string(existingContent), goBinPath) {
+		log.Log(log.INFO, "PATH already configured in %s", configFile)
+		return nil
+	}
+
+	// Append to file
+	file, err := os.OpenFile(configFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open %s: %w", configFile, err)
+	}
+	defer file.Close()
+
+	// Add comment and PATH line
+	comment := "\n# Added by zap - Go bin directory\n"
+	if _, err := file.WriteString(comment + pathLine); err != nil {
+		return fmt.Errorf("failed to write to %s: %w", configFile, err)
+	}
+
+	log.Log(log.OK, "added %s to PATH in %s", goBinPath, configFile)
+	log.Log(log.INFO, "run 'source %s' or restart your terminal to use zap", configFile)
+	
+	return nil
+}
+
+func pathAlreadyInConfig(configFile, path string) bool {
+	content, err := os.ReadFile(configFile)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(content), path)
+}
+
+func showPathInstructions(goBinPath, shellName string) {
+	fmt.Println()
+	log.Log(log.INFO, "to add %s to your PATH manually:", goBinPath)
+	
+	switch shellName {
+	case "bash":
+		if runtime.GOOS == "darwin" {
+			log.Log(log.INFO, "  echo 'export PATH=\"$PATH:%s\"' >> ~/.bash_profile", goBinPath)
+			log.Log(log.INFO, "  source ~/.bash_profile")
+		} else {
+			log.Log(log.INFO, "  echo 'export PATH=\"$PATH:%s\"' >> ~/.bashrc", goBinPath)
+			log.Log(log.INFO, "  source ~/.bashrc")
+		}
+	case "zsh":
+		log.Log(log.INFO, "  echo 'export PATH=\"$PATH:%s\"' >> ~/.zshrc", goBinPath)
+		log.Log(log.INFO, "  source ~/.zshrc")
+	case "fish":
+		log.Log(log.INFO, "  echo 'set -gx PATH $PATH %s' >> ~/.config/fish/config.fish", goBinPath)
+		log.Log(log.INFO, "  source ~/.config/fish/config.fish")
+	default:
+		log.Log(log.INFO, "  add %s to your PATH in your shell configuration file", goBinPath)
+	}
+	fmt.Println()
+}
+
 func getCommonPorts() []int {
 	return []int{
 		3000, 3001, 3002, 3003,
@@ -816,10 +984,6 @@ func handleUpdate() {
 	if originalZapPath != "" && originalZapPath != expectedZapPath {
 		log.VerboseLog("current binary at: %s", originalZapPath)
 		log.VerboseLog("will install to: %s", expectedZapPath)
-		if !strings.Contains(os.Getenv("PATH"), goBinPath) {
-			log.Log(log.INFO, "warning: %s is not in your PATH", goBinPath)
-			log.Log(log.INFO, "add it to your PATH or the update won't be found")
-		}
 	}
 
 	// Try to get the latest commit info (optional, don't fail if it doesn't work)
@@ -1043,6 +1207,15 @@ func handleUpdate() {
 	// Give filesystem a moment to sync
 	time.Sleep(200 * time.Millisecond)
 
+	// Check if PATH needs to be configured
+	if !strings.Contains(os.Getenv("PATH"), goBinPath) {
+		log.Log(log.INFO, "setting up PATH...")
+		if err := setupPath(goBinPath); err != nil {
+			log.VerboseLog("PATH setup failed: %v", err)
+			log.Log(log.INFO, "add %s to your PATH manually to use the updated version", goBinPath)
+		}
+	}
+
 	// Check the installed binary (in Go bin directory)
 	var installedZapPath string
 	if _, err := os.Stat(expectedZapPath); err == nil {
@@ -1123,7 +1296,16 @@ func handleUpdate() {
 	log.Log(log.INFO, "run 'zap version' to verify the new version")
 	if originalZapPath != "" && originalZapPath != expectedZapPath {
 		log.Log(log.INFO, "note: binary installed to %s (current: %s)", expectedZapPath, originalZapPath)
-		log.Log(log.INFO, "if version hasn't changed, ensure %s is in your PATH", goBinPath)
+		// Check if PATH needs to be configured
+		if !strings.Contains(os.Getenv("PATH"), goBinPath) {
+			log.Log(log.INFO, "setting up PATH...")
+			if err := setupPath(goBinPath); err != nil {
+				log.VerboseLog("PATH setup failed: %v", err)
+				log.Log(log.INFO, "if version hasn't changed, ensure %s is in your PATH", goBinPath)
+			}
+		} else {
+			log.Log(log.INFO, "if version hasn't changed, ensure %s is in your PATH", goBinPath)
+		}
 	} else {
 		log.Log(log.INFO, "if version hasn't changed, try: hash -r  (or restart your terminal)")
 	}
