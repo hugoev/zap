@@ -421,15 +421,17 @@ func handleUpdate() {
 	currentVersion := version
 	log.Log(log.INFO, "current version: %s", currentVersion)
 
-	// Install latest version
-	log.Log(log.INFO, "downloading latest version...")
-	cmd := exec.Command("go", "install", "github.com/hugoev/zap/cmd/zap@latest")
+	// Install latest version from main branch
+	// Using @main instead of @latest to avoid issues with old tags
+	log.Log(log.INFO, "downloading latest version from main branch...")
+	cmd := exec.Command("go", "install", "github.com/hugoev/zap/cmd/zap@main")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
 		log.Log(log.FAIL, "failed to update: %v", err)
-		log.Log(log.INFO, "you can manually update by running: go install github.com/hugoev/zap/cmd/zap@latest")
+		log.Log(log.INFO, "you can manually update by running:")
+		log.Log(log.INFO, "  go install github.com/hugoev/zap/cmd/zap@main")
 		os.Exit(1)
 	}
 
