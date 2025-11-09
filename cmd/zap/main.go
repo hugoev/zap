@@ -17,9 +17,8 @@ import (
 	"github.com/hugoev/zap/internal/config"
 	"github.com/hugoev/zap/internal/log"
 	"github.com/hugoev/zap/internal/ports"
+	"github.com/hugoev/zap/internal/version"
 )
-
-const version = "0.3.0"
 
 // Version represents a semantic version
 type Version struct {
@@ -132,7 +131,7 @@ func main() {
 	case "cleanup", "clean":
 		handleCleanup(cfg, yes, dryRun)
 	case "version", "v":
-		fmt.Printf("zap version %s\n", version)
+		fmt.Printf("zap version %s\n", version.Get())
 	case "update":
 		handleUpdate()
 	case "help", "h", "--help", "-h":
@@ -234,7 +233,7 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 		// Format process info - always show command and working directory
 		runtimeStr := formatRuntime(proc.Runtime)
 		procInfo := fmt.Sprintf(":%d PID %d (%s) [%s]", proc.Port, proc.PID, proc.Name, runtimeStr)
-		
+
 		// Always show command preview so user knows what they're killing
 		if proc.Cmd != "" {
 			cmdPreview := truncateString(proc.Cmd, 60)
@@ -242,7 +241,7 @@ func handlePorts(cfg *config.Config, yes, dryRun bool) {
 		} else {
 			procInfo += " - (command not available)"
 		}
-		
+
 		// Always show working directory
 		if proc.WorkingDir != "" {
 			procInfo += fmt.Sprintf(" [%s]", truncateString(proc.WorkingDir, 40))
@@ -592,7 +591,7 @@ func handleUpdate() {
 	log.VerboseLog("using go at: %s", goPath)
 
 	// Get current version
-	currentVersion := version
+	currentVersion := version.Get()
 	log.Log(log.INFO, "current version: %s", currentVersion)
 
 	// Check the installed binary's modification time to see if it was recently updated
@@ -605,7 +604,7 @@ func handleUpdate() {
 			originalModTime = info.ModTime()
 			// If binary was modified in the last minute, assume it's already up to date
 			if time.Since(originalModTime) < time.Minute {
-				log.Log(log.OK, "already up to date (version %s)", currentVersion)
+				log.Log(log.OK, "already up to date (version %s)", version.Get())
 				log.VerboseLog("binary was recently updated")
 				return
 			}
@@ -708,13 +707,13 @@ func handleUpdate() {
 	}
 
 	// Compare with current version
-	currentVer, parseErr := parseVersion(currentVersion)
+	currentVer, parseErr := parseVersion(version.Get())
 	if parseErr == nil && installTarget != "" {
 		if latestVersion.Compare(currentVer) <= 0 {
-			log.Log(log.OK, "already up to date (version %s)", currentVersion)
+			log.Log(log.OK, "already up to date (version %s)", version.Get())
 			return
 		}
-		log.VerboseLog("update available: %s -> %s", currentVersion, latestVersion)
+		log.VerboseLog("update available: %s -> %s", version.Get(), latestVersion)
 	}
 
 	// Fallback to @main if we can't get tags
@@ -775,16 +774,16 @@ func handleUpdate() {
 					if extractErr == nil {
 						newVer, parseErr := parseVersion(newVerStr)
 						if parseErr == nil {
-							currentVer, _ := parseVersion(currentVersion)
+							currentVer, _ := parseVersion(version.Get())
 							if newVer.Compare(currentVer) > 0 {
 								log.Log(log.OK, "update complete!")
-								log.Log(log.INFO, "upgraded from %s to %s", currentVersion, newVer)
+								log.Log(log.INFO, "upgraded from %s to %s", version.Get(), newVer)
 							} else if newVer.Compare(currentVer) == 0 {
 								log.Log(log.OK, "update complete!")
 								log.Log(log.INFO, "version: %s (same version, binary updated)", newVer)
 							} else {
 								log.Log(log.OK, "update complete!")
-								log.Log(log.INFO, "warning: new version %s appears older than current %s", newVer, currentVersion)
+								log.Log(log.INFO, "warning: new version %s appears older than current %s", newVer, version.Get())
 								log.Log(log.INFO, "this may indicate a downgrade or version mismatch")
 							}
 						} else {
@@ -805,7 +804,7 @@ func handleUpdate() {
 					}
 
 					// Warn about shell cache
-					if strings.Contains(outputStr, currentVersion) {
+					if strings.Contains(outputStr, version.Get()) {
 						log.Log(log.INFO, "note: version may be cached, restart your terminal or run: hash -r")
 					}
 				} else {
@@ -814,7 +813,7 @@ func handleUpdate() {
 					log.Log(log.INFO, "run 'zap version' to verify the new version")
 				}
 			} else if !originalModTime.IsZero() {
-				log.Log(log.OK, "already up to date (version %s)", currentVersion)
+				log.Log(log.OK, "already up to date (version %s)", version.Get())
 			} else {
 				log.Log(log.OK, "update complete!")
 				log.Log(log.INFO, "run 'zap version' to verify the new version")

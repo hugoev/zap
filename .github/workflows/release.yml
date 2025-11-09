@@ -22,9 +22,9 @@ jobs:
       - name: Detect changed files
         id: changes
         run: |
-          # Check if any .go files changed (excluding main.go version changes)
-          GO_CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '\.go$' | grep -v '^cmd/zap/main.go$' | wc -l | tr -d ' ')
-          VERSION_CHANGED=$(git diff HEAD~1 HEAD -- cmd/zap/main.go | grep -E '^\+.*const version' || echo "")
+          # Check if any .go files changed (excluding version.go changes)
+          GO_CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '\.go$' | grep -v '^internal/version/version.go$' | wc -l | tr -d ' ')
+          VERSION_CHANGED=$(git diff HEAD~1 HEAD -- internal/version/version.go | grep -E '^\+.*const Version' || echo "")
           
           if [ "$GO_CHANGED" -gt 0 ]; then
             echo "go=true" >> $GITHUB_OUTPUT
@@ -105,10 +105,17 @@ jobs:
       - name: Extract current version
         id: current
         run: |
-          VERSION=$(grep -E '^const version = ' cmd/zap/main.go | sed -E "s/^const version = \"([^\"]+)\"/\1/")
+          # Extract version from internal/version/version.go
+          VERSION=$(grep -E '^\s*const Version = ' internal/version/version.go | sed -E "s/^\s*const Version = \"([^\"]+)\"/\1/")
           if [ -z "$VERSION" ]; then
-            echo "❌ Could not extract version from cmd/zap/main.go"
-            exit 1
+            echo "❌ Could not extract version from internal/version/version.go"
+            echo "   Attempting fallback to cmd/zap/main.go..."
+            # Fallback to old location for backwards compatibility
+            VERSION=$(grep -E '^const version = ' cmd/zap/main.go | sed -E "s/^const version = \"([^\"]+)\"/\1/" || echo "")
+            if [ -z "$VERSION" ]; then
+              echo "❌ Could not extract version from either location"
+              exit 1
+            fi
           fi
           
           # Normalize: if only MAJOR.MINOR, add .0 for PATCH
@@ -163,28 +170,35 @@ jobs:
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "✅ Bumping version: $OLD_VERSION → $NEW_VERSION"
       
-      - name: Update version in main.go
+      - name: Update version in version.go
         run: |
           OLD_VERSION="${{ steps.current.outputs.version }}"
           NEW_VERSION="${{ steps.bump.outputs.new_version }}"
           
-          # Update the version constant
+          # Update the version constant in internal/version/version.go
           if [[ "$OSTYPE" == "darwin"* ]]; then
             # macOS
-            sed -i '' "s/const version = \"${OLD_VERSION}\"/const version = \"${NEW_VERSION}\"/" cmd/zap/main.go
+            sed -i '' "s/const Version = \"${OLD_VERSION}\"/const Version = \"${NEW_VERSION}\"/" internal/version/version.go
           else
             # Linux
-            sed -i "s/const version = \"${OLD_VERSION}\"/const version = \"${NEW_VERSION}\"/" cmd/zap/main.go
+            sed -i "s/const Version = \"${OLD_VERSION}\"/const Version = \"${NEW_VERSION}\"/" internal/version/version.go
           fi
           
-          echo "✅ Updated cmd/zap/main.go: ${OLD_VERSION} → ${NEW_VERSION}"
+          # Verify the update
+          UPDATED_VERSION=$(grep -E '^\s*const Version = ' internal/version/version.go | sed -E "s/^\s*const Version = \"([^\"]+)\"/\1/")
+          if [ "$UPDATED_VERSION" != "$NEW_VERSION" ]; then
+            echo "❌ Version update failed! Expected: $NEW_VERSION, Got: $UPDATED_VERSION"
+            exit 1
+          fi
+          
+          echo "✅ Updated internal/version/version.go: ${OLD_VERSION} → ${NEW_VERSION}"
       
       - name: Commit version bump
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          git add cmd/zap/main.go
+          git add internal/version/version.go
           git commit -m "chore: auto-bump version to ${{ steps.bump.outputs.new_version }}"
           git push origin main
           
@@ -212,9 +226,10 @@ jobs:
             VERSION="${{ needs.bump-version.outputs.new_version }}"
             echo "Using auto-bumped version: $VERSION"
           else
-            VERSION=$(grep -E '^const version = ' cmd/zap/main.go | sed -E "s/^const version = \"([^\"]+)\"/\1/")
+            # Extract from internal/version/version.go
+            VERSION=$(grep -E '^\s*const Version = ' internal/version/version.go | sed -E "s/^\s*const Version = \"([^\"]+)\"/\1/")
             if [ -z "$VERSION" ]; then
-              echo "❌ Could not extract version from cmd/zap/main.go"
+              echo "❌ Could not extract version from internal/version/version.go"
               exit 1
             fi
             

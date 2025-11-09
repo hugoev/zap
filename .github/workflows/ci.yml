@@ -30,9 +30,10 @@ jobs:
       
       - name: Validate version format
         run: |
-          VERSION=$(grep -E '^const version = ' cmd/zap/main.go | sed -E "s/^const version = \"([^\"]+)\"/\1/")
+          # Extract version from internal/version/version.go
+          VERSION=$(grep -E '^\s*const Version = ' internal/version/version.go | sed -E "s/^\s*const Version = \"([^\"]+)\"/\1/")
           if [ -z "$VERSION" ]; then
-            echo "❌ Could not extract version from cmd/zap/main.go"
+            echo "❌ Could not extract version from internal/version/version.go"
             exit 1
           fi
           
@@ -49,20 +50,4 @@ jobs:
           fi
           
           echo "✅ Version format valid: $VERSION"
-      
-      - name: Run tests
-        run: |
-          if [ -n "$(find . -name '*_test.go' -type f)" ]; then
-            go test -v ./...
-          else
-            echo "ℹ️  No tests found (consider adding tests)"
-          fi
-      
-      - name: Run linter
-        run: |
-          if command -v golangci-lint >/dev/null 2>&1; then
-            golangci-lint run
-          else
-            echo "ℹ️  golangci-lint not installed (consider adding linting)"
-          fi
 

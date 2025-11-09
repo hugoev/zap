@@ -43,7 +43,7 @@ const (
 var (
 	scanColor   = color.New(color.FgCyan)
 	foundColor  = color.New(color.FgYellow)
-	skipColor    = color.New(color.FgBlue)
+	skipColor   = color.New(color.FgBlue)
 	actionColor = color.New(color.FgMagenta)
 	stopColor   = color.New(color.FgRed)
 	deleteColor = color.New(color.FgRed)

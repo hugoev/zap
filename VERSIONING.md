@@ -2,10 +2,10 @@
 
 ## Current Version
 
-The version is defined in `cmd/zap/main.go`:
+The version is defined in `internal/version/version.go`:
 
 ```go
-const version = "0.3.0"
+const Version = "0.3.0"
 ```
 
 ## Automated Release Workflow
@@ -37,6 +37,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed commit message guidelines.
 Just commit your changes with the appropriate prefix:
 
 **For a new feature (MINOR bump):**
+
 ```bash
 git commit -m "feat: add new command"
 git push
@@ -44,6 +45,7 @@ git push
 ```
 
 **For a bug fix (PATCH bump):**
+
 ```bash
 git commit -m "fix: resolve port scanning issue"
 git push
@@ -51,6 +53,7 @@ git push
 ```
 
 **For a breaking change (MAJOR bump):**
+
 ```bash
 git commit -m "BREAKING: change API structure"
 git push
@@ -58,6 +61,7 @@ git push
 ```
 
 The workflow will:
+
 - Detect `.go` file changes
 - Analyze commit messages
 - Auto-bump version appropriately
@@ -65,13 +69,14 @@ The workflow will:
 
 ### Manual Version Override
 
-If you need to set a specific version, edit `cmd/zap/main.go`:
+If you need to set a specific version, edit `internal/version/version.go`:
 
 ```go
-const version = "0.5.0"  // Your desired version
+const Version = "0.5.0"  // Your desired version
 ```
 
 Then commit and push:
+
 ```bash
 git commit -m "chore: bump version to 0.5.0"
 git push
