@@ -720,35 +720,107 @@ func handleUpdate() {
 	if installTarget == "" {
 		installTarget = "github.com/hugoev/zap/cmd/zap@main"
 		log.VerboseLog("using main branch as fallback")
+		latestTag = "main" // Set latestTag for fallback case
 	}
 
 	// Install latest version with version injection
 	// go install doesn't support ldflags, so we need to build manually
 	log.Log(log.INFO, "downloading and installing latest version...")
 	
-	// Create temp directory for cloning
-	tempDir, err := os.MkdirTemp("", "zap-update-*")
-	if err != nil {
-		log.Log(log.FAIL, "failed to create temp directory: %v", err)
-		os.Exit(1)
-	}
-	defer os.RemoveAll(tempDir)
+	// Only try git clone if we have a valid tag (not "main")
+	if latestTag != "" && latestTag != "main" {
+		// Create temp directory for cloning
+		tempDir, err := os.MkdirTemp("", "zap-update-*")
+		if err != nil {
+			log.Log(log.FAIL, "failed to create temp directory: %v", err)
+			os.Exit(1)
+		}
+		defer os.RemoveAll(tempDir)
 
-	// Clone the repo
-	cloneCtx, cloneCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	cloneCmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth", "1", "--branch", latestTag, "https://github.com/hugoev/zap.git", tempDir)
-	_, cloneErr := cloneCmd.CombinedOutput()
-	cloneCancel()
-	
-	if cloneErr != nil {
-		// Fallback: clone main and checkout tag
-		cloneCtx2, cloneCancel2 := context.WithTimeout(context.Background(), 30*time.Second)
-		cloneCmd2 := exec.CommandContext(cloneCtx2, "git", "clone", "--depth", "1", "https://github.com/hugoev/zap.git", tempDir)
-		cloneOutput2, cloneErr2 := cloneCmd2.CombinedOutput()
-		cloneCancel2()
+		// Clone the repo at the specific tag
+		log.VerboseLog("cloning repository at tag %s...", latestTag)
+		cloneCtx, cloneCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cloneCmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth", "1", "--branch", latestTag, "https://github.com/hugoev/zap.git", tempDir)
+		cloneOutput, cloneErr := cloneCmd.CombinedOutput()
+		cloneCancel()
 		
-		if cloneErr2 != nil {
-			log.Log(log.FAIL, "failed to clone repository: %s", string(cloneOutput2))
+		if cloneErr != nil {
+			log.VerboseLog("failed to clone with tag, trying full clone: %s", string(cloneOutput))
+			// Fallback: clone main and checkout tag
+			cloneCtx2, cloneCancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+			cloneCmd2 := exec.CommandContext(cloneCtx2, "git", "clone", "--depth", "1", "https://github.com/hugoev/zap.git", tempDir)
+			cloneOutput2, cloneErr2 := cloneCmd2.CombinedOutput()
+			cloneCancel2()
+			
+			if cloneErr2 != nil {
+				log.Log(log.FAIL, "failed to clone repository: %s", string(cloneOutput2))
+				log.Log(log.INFO, "falling back to go install (version may show as 'dev')")
+				// Fallback to regular go install
+				updateCtx, updateCancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer updateCancel()
+				cmd = exec.CommandContext(updateCtx, "go", "install", installTarget)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				if err := cmd.Run(); err != nil {
+					log.Log(log.FAIL, "failed to install: %v", err)
+					os.Exit(1)
+				}
+				return // Exit early if we used fallback
+			} else {
+				// Checkout the tag
+				log.VerboseLog("checking out tag %s...", latestTag)
+				checkoutCtx, checkoutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				checkoutCmd := exec.CommandContext(checkoutCtx, "git", "-C", tempDir, "checkout", latestTag)
+				checkoutOutput, checkoutErr := checkoutCmd.CombinedOutput()
+				checkoutCancel()
+				if checkoutErr != nil {
+					log.Log(log.FAIL, "failed to checkout tag: %s", string(checkoutOutput))
+					log.Log(log.INFO, "falling back to go install (version may show as 'dev')")
+					// Fallback
+					updateCtx, updateCancel := context.WithTimeout(context.Background(), 60*time.Second)
+					defer updateCancel()
+					cmd = exec.CommandContext(updateCtx, "go", "install", installTarget)
+					cmd.Stdout = os.Stdout
+					cmd.Stderr = os.Stderr
+					if err := cmd.Run(); err != nil {
+						log.Log(log.FAIL, "failed to install: %v", err)
+						os.Exit(1)
+					}
+					return // Exit early if we used fallback
+				}
+			}
+		}
+
+		// Build with version injection
+		log.VerboseLog("building with version injection...")
+		buildCtx, buildCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer buildCancel()
+		
+		versionStr := strings.TrimPrefix(latestTag, "v") // Remove 'v' prefix
+		commitCtx, commitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		commitCmd := exec.CommandContext(commitCtx, "git", "-C", tempDir, "rev-parse", "--short", "HEAD")
+		commitOutput, _ := commitCmd.Output()
+		commitCancel()
+		commitHash := strings.TrimSpace(string(commitOutput))
+		if commitHash == "" {
+			commitHash = "unknown"
+		}
+		
+		dateStr := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+		
+		ldflags := fmt.Sprintf("-X github.com/hugoev/zap/internal/version.Version=%s -X github.com/hugoev/zap/internal/version.Commit=%s -X github.com/hugoev/zap/internal/version.Date=%s",
+			versionStr, commitHash, dateStr)
+		
+		log.VerboseLog("building with version: %s, commit: %s", versionStr, commitHash)
+		buildCmd := exec.CommandContext(buildCtx, "go", "build", "-ldflags", ldflags, "-o", expectedZapPath, "./cmd/zap")
+		buildCmd.Dir = tempDir
+		buildCmd.Stdout = os.Stdout
+		buildCmd.Stderr = os.Stderr
+		buildErr := buildCmd.Run()
+		buildCancel()
+		
+		if buildErr != nil {
+			log.Log(log.FAIL, "failed to build update: %v", buildErr)
 			log.Log(log.INFO, "falling back to go install (version may show as 'dev')")
 			// Fallback to regular go install
 			updateCtx, updateCancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -761,58 +833,13 @@ func handleUpdate() {
 				os.Exit(1)
 			}
 		} else {
-			// Checkout the tag
-			checkoutCtx, checkoutCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			checkoutCmd := exec.CommandContext(checkoutCtx, "git", "-C", tempDir, "checkout", latestTag)
-			checkoutOutput, checkoutErr := checkoutCmd.CombinedOutput()
-			checkoutCancel()
-			if checkoutErr != nil {
-				log.Log(log.FAIL, "failed to checkout tag: %s", string(checkoutOutput))
-				log.Log(log.INFO, "falling back to go install (version may show as 'dev')")
-				// Fallback
-				updateCtx, updateCancel := context.WithTimeout(context.Background(), 60*time.Second)
-				defer updateCancel()
-				cmd = exec.CommandContext(updateCtx, "go", "install", installTarget)
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				if err := cmd.Run(); err != nil {
-					log.Log(log.FAIL, "failed to install: %v", err)
-					os.Exit(1)
-				}
-			}
+			// Make the binary executable
+			os.Chmod(expectedZapPath, 0755)
+			log.VerboseLog("built binary with version %s at %s", versionStr, expectedZapPath)
 		}
-	}
-
-	// Build with version injection
-	buildCtx, buildCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer buildCancel()
-	
-	versionStr := strings.TrimPrefix(latestTag, "v") // Remove 'v' prefix
-	commitCtx, commitCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	commitCmd := exec.CommandContext(commitCtx, "git", "-C", tempDir, "rev-parse", "--short", "HEAD")
-	commitOutput, _ := commitCmd.Output()
-	commitCancel()
-	commitHash := strings.TrimSpace(string(commitOutput))
-	if commitHash == "" {
-		commitHash = "unknown"
-	}
-	
-	dateStr := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	
-	ldflags := fmt.Sprintf("-X github.com/hugoev/zap/internal/version.Version=%s -X github.com/hugoev/zap/internal/version.Commit=%s -X github.com/hugoev/zap/internal/version.Date=%s",
-		versionStr, commitHash, dateStr)
-	
-	buildCmd := exec.CommandContext(buildCtx, "go", "build", "-ldflags", ldflags, "-o", expectedZapPath, "./cmd/zap")
-	buildCmd.Dir = tempDir
-	buildCmd.Stdout = os.Stdout
-	buildCmd.Stderr = os.Stderr
-	buildErr := buildCmd.Run()
-	buildCancel()
-	
-	if buildErr != nil {
-		log.Log(log.FAIL, "failed to build update: %v", buildErr)
-		log.Log(log.INFO, "falling back to go install (version may show as 'dev')")
-		// Fallback to regular go install
+	} else {
+		// No tag available, fallback to go install
+		log.VerboseLog("no version tag available, using go install (version may show as 'dev')")
 		updateCtx, updateCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer updateCancel()
 		cmd = exec.CommandContext(updateCtx, "go", "install", installTarget)
@@ -822,10 +849,6 @@ func handleUpdate() {
 			log.Log(log.FAIL, "failed to install: %v", err)
 			os.Exit(1)
 		}
-	} else {
-		// Make the binary executable
-		os.Chmod(expectedZapPath, 0755)
-		log.VerboseLog("built binary with version %s at %s", versionStr, expectedZapPath)
 	}
 
 	// Verify the update by checking the new binary's version
