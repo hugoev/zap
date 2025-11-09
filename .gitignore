@@ -6,6 +6,9 @@ zap
 *.so
 *.dylib
 
+# Don't ignore source files in cmd/zap
+!cmd/zap/*.go
+
 # Test binary, built with `go test -c`
 *.test
 

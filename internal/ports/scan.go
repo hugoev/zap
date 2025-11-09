@@ -71,7 +71,7 @@ func ScanPortsRange(ports []int) ([]ProcessInfo, error) {
 	}
 
 	results := make(chan result, len(ports))
-	
+
 	// Launch parallel scans
 	for _, port := range ports {
 		go func(p int) {

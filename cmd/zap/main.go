@@ -48,14 +48,14 @@ var commonDevPorts = []int{
 func parsePortRange(portsStr string) ([]int, error) {
 	var ports []int
 	seen := make(map[int]bool)
-	
+
 	parts := strings.Split(portsStr, ",")
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-		
+
 		// Check if it's a range (e.g., "3000-3010")
 		if strings.Contains(part, "-") {
 			rangeParts := strings.Split(part, "-")
@@ -98,11 +98,11 @@ func parsePortRange(portsStr string) ([]int, error) {
 			}
 		}
 	}
-	
+
 	if len(ports) == 0 {
 		return nil, fmt.Errorf("no valid ports specified")
 	}
-	
+
 	return ports, nil
 }
 
@@ -239,7 +239,7 @@ func main() {
 func parseFlags(args []string) (map[string]bool, map[string]string) {
 	flags := make(map[string]bool)
 	flagValues := make(map[string]string)
-	
+
 	for i, arg := range args {
 		if strings.HasPrefix(arg, "--") {
 			flag := strings.TrimPrefix(arg, "--")
