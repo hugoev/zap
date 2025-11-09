@@ -5,54 +5,56 @@
 The version is defined in `cmd/zap/main.go`:
 
 ```go
-const version = "0.1.0"
+const version = "0.3.0"
 ```
 
-## How to Update the Version
+## Automated Release Workflow
 
-### Method 1: Manual Update (Simple)
+**Versioning is now automated!** When you push a version change to GitHub, the workflow automatically:
 
-1. Edit `cmd/zap/main.go` and change the version:
+1. ✅ Detects the version change in `cmd/zap/main.go`
+2. ✅ Validates the semantic version format
+3. ✅ Creates a git tag (e.g., `v0.3.0`)
+4. ✅ Creates a GitHub release with changelog
+5. ✅ Prevents duplicate releases for the same version
 
-   ```go
-   const version = "0.2.0"  // or whatever version you want
-   ```
+## How to Release a New Version
 
-2. Commit the change:
+### Step 1: Update the Version
 
-   ```bash
-   git add cmd/zap/main.go
-   git commit -m "Bump version to 0.2.0"
-   ```
+Edit `cmd/zap/main.go` and change the version:
 
-3. Tag the release (recommended):
+```go
+const version = "0.4.0"  // or whatever version you want
+```
 
-   ```bash
-   git tag -a v0.2.0 -m "Release version 0.2.0"
-   git push origin main --tags
-   ```
-
-4. Rebuild and reinstall:
-   ```bash
-   go install ./cmd/zap
-   ```
-
-### Method 2: Using Git Tags (Recommended)
-
-For a more professional workflow:
-
-1. Update the version in `cmd/zap/main.go`
-2. Commit the changes
-3. Create a git tag:
-   ```bash
-   git tag v0.2.0
-   git push origin v0.2.0
-   ```
-
-This allows users to install specific versions:
+### Step 2: Commit and Push
 
 ```bash
-go install github.com/hugoev/zap/cmd/zap@v0.2.0
+git add cmd/zap/main.go
+git commit -m "Bump version to 0.4.0"
+git push origin main
+```
+
+### Step 3: Automation Takes Over
+
+The GitHub Actions workflow will:
+- Detect the version change
+- Validate the format (must be MAJOR.MINOR.PATCH)
+- Check if the tag already exists (prevents duplicates)
+- Create the tag `v0.4.0`
+- Create a GitHub release with changelog
+- Make it available for `go install github.com/hugoev/zap/cmd/zap@v0.4.0`
+
+**That's it!** No manual tagging needed.
+
+### Manual Tagging (Fallback)
+
+If you need to create a tag manually (e.g., if automation fails):
+
+```bash
+git tag -a v0.4.0 -m "Release version 0.4.0"
+git push origin v0.4.0
 ```
 
 ## Version Numbering
