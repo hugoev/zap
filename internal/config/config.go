@@ -3,11 +3,13 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -56,6 +58,77 @@ func getConfigPath() (string, error) {
 
 func getBackupPath(configPath string) string {
 	return configPath + ".backup"
+}
+
+// getBackupPath2 returns a secondary backup path (for multiple backup levels)
+func getBackupPath2(configPath string) string {
+	return configPath + ".backup2"
+}
+
+// renameFile performs an atomic rename, falling back to copy+remove for cross-filesystem moves
+func renameFile(src, dst string) error {
+	// Try atomic rename first (works on same filesystem)
+	err := os.Rename(src, dst)
+	if err == nil {
+		return nil
+	}
+
+	// Check if error is due to cross-filesystem move (EXDEV)
+	if linkErr, ok := err.(*os.LinkError); ok {
+		if linkErr.Err == syscall.EXDEV {
+			// Cross-filesystem: use copy+remove
+			if copyErr := copyConfigFile(src, dst); copyErr != nil {
+				return fmt.Errorf("cross-filesystem rename failed (copy step): %w", copyErr)
+			}
+			// Verify destination before removing source
+			if _, statErr := os.Stat(dst); statErr != nil {
+				return fmt.Errorf("cross-filesystem rename failed (verification): %w", statErr)
+			}
+			// Remove source after successful copy
+			if removeErr := os.Remove(src); removeErr != nil {
+				// Log but don't fail - destination is correct
+			}
+			return nil
+		}
+	}
+
+	// Other rename errors
+	return fmt.Errorf("rename failed: %w", err)
+}
+
+// copyConfigFile copies a config file preserving permissions
+func copyConfigFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer sourceFile.Close()
+
+	// Get source file info for permissions
+	sourceInfo, err := sourceFile.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat source file: %w", err)
+	}
+
+	// Create destination file with same permissions
+	destFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, sourceInfo.Mode())
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer destFile.Close()
+
+	// Copy contents
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return fmt.Errorf("failed to copy file contents: %w", err)
+	}
+
+	// Sync to ensure data is written
+	if err := destFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync destination file: %w", err)
+	}
+
+	return nil
 }
 
 // checkDiskSpaceForConfig verifies sufficient disk space for config file operations
@@ -213,11 +286,23 @@ func Load() (*Config, error) {
 }
 
 func recoverFromCorruption(configPath string, decodeErr error) (*Config, error) {
-	// Try to restore from backup
+	// Try to restore from primary backup first
 	if backupCfg, err := loadFromBackup(configPath); err == nil {
 		// Backup exists and is valid - restore it
 		if saveErr := saveWithLock(backupCfg); saveErr == nil {
 			return backupCfg, nil
+		}
+	}
+
+	// Try secondary backup if primary backup failed
+	backupPath2 := getBackupPath2(configPath)
+	if backupData2, err := os.ReadFile(backupPath2); err == nil {
+		var backupCfg2 Config
+		if json.Unmarshal(backupData2, &backupCfg2) == nil {
+			// Secondary backup is valid - restore it
+			if saveErr := saveWithLock(&backupCfg2); saveErr == nil {
+				return &backupCfg2, nil
+			}
 		}
 	}
 
@@ -318,19 +403,26 @@ func saveWithLock(cfg *Config) error {
 			return fmt.Errorf("failed to sync config: %w", err)
 		}
 
-		// Create backup before replacing (check disk space first)
+		// Create multiple backup levels before replacing (check disk space first)
 		if existingData, readErr := os.ReadFile(configPath); readErr == nil {
+			// Primary backup
 			backupPath := getBackupPath(configPath)
-			// Check disk space for backup
 			if backupErr := checkDiskSpaceForConfig(backupPath, int64(len(existingData))); backupErr == nil {
 				os.WriteFile(backupPath, existingData, 0644)
 			}
-			// Log but don't fail - backup is optional
+			// Secondary backup (rotate: backup2 becomes backup, current becomes backup2)
+			backupPath2 := getBackupPath2(configPath)
+			if backupData2, readErr2 := os.ReadFile(backupPath); readErr2 == nil {
+				if backupErr2 := checkDiskSpaceForConfig(backupPath2, int64(len(backupData2))); backupErr2 == nil {
+					os.WriteFile(backupPath2, backupData2, 0644)
+				}
+			}
+			// Log but don't fail - backups are optional
 		}
 
-		// Atomic rename (atomic on most filesystems)
+		// Atomic rename (atomic on most filesystems, fallback for cross-filesystem)
 		// This is crash-safe: if rename fails, temp file remains and can be recovered
-		if err := os.Rename(tempPath, configPath); err != nil {
+		if err := renameFile(tempPath, configPath); err != nil {
 			// On failure, temp file still exists - attempt recovery
 			// Check if temp file is valid JSON before suggesting recovery
 			if tempData, readErr := os.ReadFile(tempPath); readErr == nil {
@@ -364,18 +456,25 @@ func saveWithLock(cfg *Config) error {
 		}
 		defer os.Remove(tempPath) // Cleanup on error
 
-		// Create backup before replacing (check disk space first)
+		// Create multiple backup levels before replacing (check disk space first)
 		if existingData, readErr := os.ReadFile(configPath); readErr == nil {
+			// Primary backup
 			backupPath := getBackupPath(configPath)
-			// Check disk space for backup
 			if backupErr := checkDiskSpaceForConfig(backupPath, int64(len(existingData))); backupErr == nil {
 				os.WriteFile(backupPath, existingData, 0644)
 			}
-			// Log but don't fail - backup is optional
+			// Secondary backup (rotate: backup2 becomes backup, current becomes backup2)
+			backupPath2 := getBackupPath2(configPath)
+			if backupData2, readErr2 := os.ReadFile(backupPath); readErr2 == nil {
+				if backupErr2 := checkDiskSpaceForConfig(backupPath2, int64(len(backupData2))); backupErr2 == nil {
+					os.WriteFile(backupPath2, backupData2, 0644)
+				}
+			}
+			// Log but don't fail - backups are optional
 		}
 
-		// Atomic rename
-		if err := os.Rename(tempPath, configPath); err != nil {
+		// Atomic rename (with cross-filesystem fallback)
+		if err := renameFile(tempPath, configPath); err != nil {
 			return fmt.Errorf("failed to commit config: %w", err)
 		}
 	}

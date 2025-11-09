@@ -870,8 +870,9 @@ func setupPath(goBinPath string) error {
 		return nil
 	}
 
-	// Add to config file
-	pathLine := fmt.Sprintf("\nexport PATH=\"$PATH:%s\"\n", goBinPath)
+	// Add to config file with proper escaping for special characters
+	escapedPath := shellEscape(goBinPath)
+	pathLine := fmt.Sprintf("\nexport PATH=$PATH:%s\n", escapedPath)
 
 	// Read existing file
 	existingContent, err := os.ReadFile(configFile)
@@ -976,6 +977,39 @@ func getBinaryArchitecture(binaryPath string) (string, error) {
 
 	// If we can't determine, return error
 	return "", fmt.Errorf("unable to determine architecture from file output: %s", fileOutput)
+}
+
+// renameFile performs an atomic rename, falling back to copy+remove for cross-filesystem moves
+func renameFile(src, dst string) error {
+	// Try atomic rename first (works on same filesystem)
+	err := os.Rename(src, dst)
+	if err == nil {
+		return nil
+	}
+
+	// Check if error is due to cross-filesystem move (EXDEV)
+	if linkErr, ok := err.(*os.LinkError); ok {
+		if linkErr.Err == syscall.EXDEV {
+			// Cross-filesystem: use copy+remove
+			log.VerboseLog("cross-filesystem rename detected, using copy+remove fallback")
+			if copyErr := copyFile(src, dst); copyErr != nil {
+				return fmt.Errorf("cross-filesystem rename failed (copy step): %w", copyErr)
+			}
+			// Verify destination before removing source
+			if _, statErr := os.Stat(dst); statErr != nil {
+				return fmt.Errorf("cross-filesystem rename failed (verification): %w", statErr)
+			}
+			// Remove source after successful copy
+			if removeErr := os.Remove(src); removeErr != nil {
+				// Log but don't fail - destination is correct
+				log.VerboseLog("warning: failed to remove source after cross-filesystem copy: %v", removeErr)
+			}
+			return nil
+		}
+	}
+
+	// Other rename errors
+	return fmt.Errorf("rename failed: %w", err)
 }
 
 func copyFile(src, dst string) error {
@@ -1399,17 +1433,29 @@ func handleUpdate(instanceLock *lock.InstanceLock) {
 				log.VerboseLog("temporarily releasing lock for verification...")
 				instanceLock.Release()
 			}
-			
+
 			verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			verifyCmd := exec.CommandContext(verifyCtx, tempBinaryPath, "version")
 			verifyOutput, verifyErr := verifyCmd.Output()
 			verifyCancel()
-			
-			// Re-acquire the lock immediately after verification
+
+			// Re-acquire the lock immediately after verification with retry logic
 			if instanceLock != nil {
 				log.VerboseLog("re-acquiring lock after verification...")
 				var reacquireErr error
-				instanceLock, reacquireErr = lock.AcquireLock()
+				maxRetries := 3
+				retryDelay := 100 * time.Millisecond
+				for attempt := 0; attempt < maxRetries; attempt++ {
+					instanceLock, reacquireErr = lock.AcquireLock()
+					if reacquireErr == nil {
+						break // Successfully re-acquired
+					}
+					if attempt < maxRetries-1 {
+						log.VerboseLog("lock re-acquisition attempt %d/%d failed, retrying...", attempt+1, maxRetries)
+						time.Sleep(retryDelay)
+						retryDelay *= 2 // Exponential backoff
+					}
+				}
 				if reacquireErr != nil {
 					// Couldn't re-acquire lock - another instance might have started
 					os.Remove(tempBinaryPath)
@@ -1441,9 +1487,9 @@ func handleUpdate(instanceLock *lock.InstanceLock) {
 				}
 			}
 
-			// Replace old binary with new one (atomic on most filesystems)
+			// Replace old binary with new one (atomic on most filesystems, fallback for cross-filesystem)
 			log.VerboseLog("replacing binary: %s -> %s", tempBinaryPath, expectedZapPath)
-			if err := os.Rename(tempBinaryPath, expectedZapPath); err != nil {
+			if err := renameFile(tempBinaryPath, expectedZapPath); err != nil {
 				// Replacement failed - restore backup if we created one
 				os.Remove(tempBinaryPath)
 				if backupPath != "" {
@@ -1468,17 +1514,28 @@ func handleUpdate(instanceLock *lock.InstanceLock) {
 				log.VerboseLog("temporarily releasing lock for final verification...")
 				instanceLock.Release()
 			}
-			
+
 			finalVerifyCtx, finalVerifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			finalVerifyCmd := exec.CommandContext(finalVerifyCtx, expectedZapPath, "version")
 			finalVerifyOutput, finalVerifyErr := finalVerifyCmd.Output()
 			finalVerifyCancel()
-			
-			// Re-acquire lock after final verification
+
+			// Re-acquire lock after final verification with retry logic
 			if instanceLock != nil {
 				log.VerboseLog("re-acquiring lock after final verification...")
 				var reacquireErr error
-				instanceLock, reacquireErr = lock.AcquireLock()
+				maxRetries := 3
+				retryDelay := 100 * time.Millisecond
+				for attempt := 0; attempt < maxRetries; attempt++ {
+					instanceLock, reacquireErr = lock.AcquireLock()
+					if reacquireErr == nil {
+						break // Successfully re-acquired
+					}
+					if attempt < maxRetries-1 {
+						time.Sleep(retryDelay)
+						retryDelay *= 2 // Exponential backoff
+					}
+				}
 				if reacquireErr != nil {
 					log.Log(log.INFO, "warning: could not re-acquire lock after final verification (another instance may have started)")
 					// Don't fail - update is complete

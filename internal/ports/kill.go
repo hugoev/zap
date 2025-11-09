@@ -126,7 +126,21 @@ func KillProcessGroup(pid int) error {
 	// Adaptive timeout: base timeout + additional time per process
 	// For large process groups (1000+), allow more time
 	// Formula: base 3s + 10ms per process, capped at 30s for very large groups
-	adaptiveTimeout := GracefulTerminationTimeout + time.Duration(processCount)*10*time.Millisecond
+	// Use int64 to prevent overflow for extremely large process counts
+	var adaptiveTimeout time.Duration
+	if processCount > 0 {
+		// Calculate with overflow protection
+		timePerProcess := time.Duration(10) * time.Millisecond
+		additionalTime := time.Duration(processCount) * timePerProcess
+		// Cap additional time to prevent overflow (max 27s additional = 30s total)
+		maxAdditionalTime := 27 * time.Second
+		if additionalTime > maxAdditionalTime {
+			additionalTime = maxAdditionalTime
+		}
+		adaptiveTimeout = GracefulTerminationTimeout + additionalTime
+	} else {
+		adaptiveTimeout = GracefulTerminationTimeout
+	}
 	maxTimeout := 30 * time.Second
 	if adaptiveTimeout > maxTimeout {
 		adaptiveTimeout = maxTimeout

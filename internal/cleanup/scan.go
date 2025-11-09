@@ -227,7 +227,7 @@ func calculateDirSize(path string) (int64, error) {
 	var size int64
 	var sizeErrors []error
 	fileCount := 0
-	maxFiles := 100000 // Limit to prevent excessive scanning
+	maxFiles := 1000000 // Increased limit to 1M files (prevents excessive scanning while handling large projects)
 
 	err := filepath.Walk(path, func(filePath string, info os.FileInfo, err error) error {
 		if err != nil {

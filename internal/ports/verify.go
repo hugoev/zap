@@ -12,8 +12,10 @@ import (
 )
 
 const (
-	// ProcessVerificationTimeout is the maximum time to wait for process verification
+	// ProcessVerificationTimeout is the maximum time to wait for process verification per attempt
 	ProcessVerificationTimeout = 5 * time.Second
+	// ProcessVerificationMaxRetries is the maximum number of retry attempts for verification
+	ProcessVerificationMaxRetries = 2
 )
 
 // VerifyProcessMatches verifies that a process still matches the expected ProcessInfo
@@ -28,30 +30,51 @@ func VerifyProcessMatchesWithContext(ctx context.Context, pid int, expected Proc
 		return false, fmt.Errorf("invalid PID: %d", pid)
 	}
 
-	// Create timeout context if not provided
-	if ctx == nil {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.Background(), ProcessVerificationTimeout)
-		defer cancel()
-	}
-
-	// Get current process details with timeout
-	type result struct {
-		details processDetails
-	}
-	resultChan := make(chan result, 1)
-
-	go func() {
-		details := getProcessDetails(pid)
-		resultChan <- result{details: details}
-	}()
-
+	// Retry logic for slow systems or temporary failures
 	var current processDetails
-	select {
-	case res := <-resultChan:
-		current = res.details
-	case <-ctx.Done():
-		return false, fmt.Errorf("process verification timeout: %w", ctx.Err())
+	var lastErr error
+	for attempt := 0; attempt <= ProcessVerificationMaxRetries; attempt++ {
+		// Create timeout context if not provided
+		verifyCtx := ctx
+		if verifyCtx == nil {
+			var cancel context.CancelFunc
+			verifyCtx, cancel = context.WithTimeout(context.Background(), ProcessVerificationTimeout)
+			defer cancel()
+		}
+
+		// Get current process details with timeout
+		type result struct {
+			details processDetails
+		}
+		resultChan := make(chan result, 1)
+		
+		go func() {
+			details := getProcessDetails(pid)
+			resultChan <- result{details: details}
+		}()
+
+		select {
+		case res := <-resultChan:
+			current = res.details
+			// Successfully got details, proceed with verification
+			lastErr = nil
+			// Break out of retry loop
+			goto verificationComplete
+		case <-verifyCtx.Done():
+			lastErr = fmt.Errorf("process verification timeout (attempt %d/%d): %w", attempt+1, ProcessVerificationMaxRetries+1, verifyCtx.Err())
+			// If this is not the last attempt, retry
+			if attempt < ProcessVerificationMaxRetries {
+				// Brief delay before retry
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			return false, lastErr
+		}
+	}
+
+verificationComplete:
+	if lastErr != nil {
+		return false, lastErr
 	}
 
 	// If we can't get details, assume it doesn't match (safer)

@@ -40,26 +40,36 @@ func AcquireLock() (*InstanceLock, error) {
 		return nil, fmt.Errorf("failed to create lock directory: %w", err)
 	}
 
-	// Check for stale lock file and clean it up if needed
-	if err := cleanupStaleLock(lockPath); err != nil {
-		// Log but don't fail - we'll try to acquire lock anyway
-	}
-
-	// Open lock file
+	// Open lock file first (before cleanup to avoid race condition)
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create lock file: %w", err)
 	}
 
-	// Try to acquire exclusive lock (non-blocking)
+	// Try to acquire exclusive lock (non-blocking) first
 	err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if err != nil {
+	if err == nil {
+		// Lock acquired successfully - check for stale lock and clean up if needed
+		// (We have the lock, so it's safe to clean up)
+		cleanupStaleLock(lockPath)
+	} else {
+		// Lock is held - check if it's stale before reporting error
 		file.Close()
-		// Check if lock file exists and read PID
-		if existingPID, readErr := os.ReadFile(lockPath); readErr == nil {
-			return nil, fmt.Errorf("another instance of zap is already running (PID: %s)", string(existingPID))
+		// Try to clean up stale lock (might allow us to acquire it)
+		if cleanupErr := cleanupStaleLock(lockPath); cleanupErr == nil {
+			// Try again after cleanup
+			file, err = os.OpenFile(lockPath, os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+			}
 		}
-		return nil, fmt.Errorf("another instance of zap is already running")
+		if err != nil {
+			// Still can't acquire - check if lock file exists and read PID
+			if existingPID, readErr := os.ReadFile(lockPath); readErr == nil {
+				return nil, fmt.Errorf("another instance of zap is already running (PID: %s)", string(existingPID))
+			}
+			return nil, fmt.Errorf("another instance of zap is already running")
+		}
 	}
 
 	// Write PID to lock file

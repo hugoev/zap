@@ -147,21 +147,49 @@ func checkNetworkMount(path string) error {
 
 	var stat unix.Statfs_t
 	if err := unix.Statfs(path, &stat); err != nil {
-		// Check for network-related errors
+		// Check for network-related errors (only report actual network errors)
 		if err == unix.ENOTCONN || err == unix.EHOSTUNREACH || err == unix.ETIMEDOUT {
 			return fmt.Errorf("network mount disconnected: %s (error: %w)", path, err)
 		}
-		return nil // Other errors are not network-related
+		// Other errors (permission denied, not found, etc.) are not network-related
+		// Don't report them as network mount issues to avoid false positives
+		return nil
 	}
 
 	// Check filesystem type to detect common network filesystems
-	// Common network filesystem type values (varies by system)
-	// NFS, SMB/CIFS, etc. are typically remote filesystems
-	// This is a heuristic - not all systems expose this the same way
-	// On Linux, we can check /proc/mounts, but for portability we use Statfs
-	// The Fstypename field (if available) or type detection can help
+	// Only flag as network mount if we can definitively identify it
+	// This reduces false positives for local filesystems
+	// On Linux, check /proc/mounts for more reliable detection
+	if runtime.GOOS == "linux" {
+		// Read /proc/mounts to check filesystem type
+		mountsData, err := os.ReadFile("/proc/mounts")
+		if err == nil {
+			mountsStr := string(mountsData)
+			// Check if path is in mounts and identify filesystem type
+			lines := strings.Split(mountsStr, "\n")
+			for _, line := range lines {
+				fields := strings.Fields(line)
+				if len(fields) >= 3 {
+					mountPoint := fields[1]
+					fsType := fields[2]
+					// Check if our path is under this mount point
+					if strings.HasPrefix(path, mountPoint) {
+						// Known network filesystem types
+						networkFS := []string{"nfs", "nfs4", "cifs", "smb", "smbfs", "fuse.sshfs", "9p"}
+						for _, netFS := range networkFS {
+							if strings.Contains(strings.ToLower(fsType), netFS) {
+								// This is a network mount - return nil (no error, just identified)
+								return nil
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
-	// For now, we'll rely on error detection (ENOTCONN, etc.) which is more reliable
+	// For macOS and other systems, rely on error detection only
+	// This avoids false positives from local filesystems
 	// Network disconnection will be caught during actual operations
 
 	return nil
