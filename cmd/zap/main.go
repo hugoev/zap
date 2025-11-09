@@ -28,32 +28,38 @@ type Version struct {
 	Patch int
 }
 
-// parseVersion parses a semantic version string (e.g., "0.3.0" or "v0.3.0")
+// parseVersion parses a semantic version string (e.g., "0.3.0", "v0.3.0", "4.1", "4.1.0")
 func parseVersion(v string) (Version, error) {
 	// Remove 'v' prefix if present
 	v = strings.TrimPrefix(v, "v")
-	
-	// Validate format: MAJOR.MINOR.PATCH
+
+	// Normalize: if only MAJOR.MINOR, add .0 for PATCH
 	parts := strings.Split(v, ".")
-	if len(parts) != 3 {
-		return Version{}, fmt.Errorf("invalid version format: %s (expected MAJOR.MINOR.PATCH)", v)
+	if len(parts) == 2 {
+		v = v + ".0"
+		parts = strings.Split(v, ".")
 	}
-	
+
+	// Validate format: MAJOR.MINOR.PATCH
+	if len(parts) != 3 {
+		return Version{}, fmt.Errorf("invalid version format: %s (expected MAJOR.MINOR.PATCH or MAJOR.MINOR)", v)
+	}
+
 	major, err := strconv.Atoi(parts[0])
 	if err != nil {
 		return Version{}, fmt.Errorf("invalid major version: %s", parts[0])
 	}
-	
+
 	minor, err := strconv.Atoi(parts[1])
 	if err != nil {
 		return Version{}, fmt.Errorf("invalid minor version: %s", parts[1])
 	}
-	
+
 	patch, err := strconv.Atoi(parts[2])
 	if err != nil {
 		return Version{}, fmt.Errorf("invalid patch version: %s", parts[2])
 	}
-	
+
 	return Version{Major: major, Minor: minor, Patch: patch}, nil
 }
 
@@ -639,15 +645,15 @@ func handleUpdate() {
 	var installTarget string
 	var latestTag string
 	var latestVersion Version
-	
+
 	maxRetries := 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-		
+
 		tagCmd := exec.CommandContext(ctx2, "git", "ls-remote", "--tags", "--sort=-v:refname", "https://github.com/hugoev/zap.git", "v*")
 		tagOutput, tagErr := tagCmd.Output()
 		cancel2()
-		
+
 		if tagErr == nil && len(tagOutput) > 0 {
 			// Parse all tags and find the latest valid semantic version
 			lines := strings.Split(strings.TrimSpace(string(tagOutput)), "\n")
@@ -680,19 +686,19 @@ func handleUpdate() {
 					}
 				}
 			}
-			
+
 			if installTarget != "" {
 				log.VerboseLog("found latest tag: %s (version %s)", latestTag, latestVersion)
 				break
 			}
 		}
-		
+
 		if attempt < maxRetries {
 			log.VerboseLog("tag fetch attempt %d failed, retrying...", attempt)
 			time.Sleep(time.Duration(attempt) * time.Second)
 		}
 	}
-	
+
 	// Compare with current version
 	currentVer, parseErr := parseVersion(currentVersion)
 	if parseErr == nil && installTarget != "" {
@@ -752,10 +758,10 @@ func handleUpdate() {
 				verifyCmd := exec.CommandContext(verifyCtx, installedZapPath, "version")
 				verifyOutput, verifyErr := verifyCmd.Output()
 				verifyCancel()
-				
+
 				if verifyErr == nil {
 					outputStr := strings.TrimSpace(string(verifyOutput))
-					
+
 					// Extract and compare versions
 					newVerStr, extractErr := extractVersionFromOutput(outputStr)
 					if extractErr == nil {
@@ -781,7 +787,7 @@ func handleUpdate() {
 						log.Log(log.OK, "update complete!")
 						log.Log(log.INFO, "new version: %s", outputStr)
 					}
-					
+
 					// Check if PATH needs updating
 					if installedZapPath == expectedZapPath && originalZapPath != expectedZapPath {
 						log.Log(log.INFO, "updated binary installed to: %s", expectedZapPath)
@@ -789,7 +795,7 @@ func handleUpdate() {
 							log.Log(log.INFO, "add %s to your PATH to use the updated version", goBinPath)
 						}
 					}
-					
+
 					// Warn about shell cache
 					if strings.Contains(outputStr, currentVersion) {
 						log.Log(log.INFO, "note: version may be cached, restart your terminal or run: hash -r")
