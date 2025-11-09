@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +20,81 @@ import (
 )
 
 const version = "0.3.0"
+
+// Version represents a semantic version
+type Version struct {
+	Major int
+	Minor int
+	Patch int
+}
+
+// parseVersion parses a semantic version string (e.g., "0.3.0" or "v0.3.0")
+func parseVersion(v string) (Version, error) {
+	// Remove 'v' prefix if present
+	v = strings.TrimPrefix(v, "v")
+	
+	// Validate format: MAJOR.MINOR.PATCH
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return Version{}, fmt.Errorf("invalid version format: %s (expected MAJOR.MINOR.PATCH)", v)
+	}
+	
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return Version{}, fmt.Errorf("invalid major version: %s", parts[0])
+	}
+	
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return Version{}, fmt.Errorf("invalid minor version: %s", parts[1])
+	}
+	
+	patch, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return Version{}, fmt.Errorf("invalid patch version: %s", parts[2])
+	}
+	
+	return Version{Major: major, Minor: minor, Patch: patch}, nil
+}
+
+// Compare returns: -1 if v < other, 0 if v == other, 1 if v > other
+func (v Version) Compare(other Version) int {
+	if v.Major != other.Major {
+		if v.Major < other.Major {
+			return -1
+		}
+		return 1
+	}
+	if v.Minor != other.Minor {
+		if v.Minor < other.Minor {
+			return -1
+		}
+		return 1
+	}
+	if v.Patch != other.Patch {
+		if v.Patch < other.Patch {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+// String returns the version as a string
+func (v Version) String() string {
+	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
+}
+
+// extractVersionFromOutput extracts version from "zap version X.Y.Z" output
+func extractVersionFromOutput(output string) (string, error) {
+	// Match patterns like "zap version 0.3.0" or "0.3.0"
+	re := regexp.MustCompile(`(\d+\.\d+\.\d+)`)
+	matches := re.FindStringSubmatch(output)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("could not extract version from: %s", output)
+	}
+	return matches[1], nil
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -558,35 +635,72 @@ func handleUpdate() {
 		log.VerboseLog("latest module version: %s", latestModuleVersion)
 	}
 
-	// Try to get the latest version tag from GitHub
-	// First try to get the latest tag
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel2()
-	
-	tagCmd := exec.CommandContext(ctx2, "git", "ls-remote", "--tags", "--sort=-v:refname", "https://github.com/hugoev/zap.git", "v*")
-	tagOutput, tagErr := tagCmd.Output()
-	
+	// Try to get the latest version tag from GitHub with retry logic
 	var installTarget string
-	if tagErr == nil && len(tagOutput) > 0 {
-		// Parse the latest tag from output
-		lines := strings.Split(strings.TrimSpace(string(tagOutput)), "\n")
-		if len(lines) > 0 {
-			// Extract tag name from line like "refs/tags/v0.3.0" or "refs/tags/v0.3.0^{}"
-			parts := strings.Fields(lines[0])
-			if len(parts) > 0 {
-				tagRef := parts[len(parts)-1]
+	var latestTag string
+	var latestVersion Version
+	
+	maxRetries := 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+		
+		tagCmd := exec.CommandContext(ctx2, "git", "ls-remote", "--tags", "--sort=-v:refname", "https://github.com/hugoev/zap.git", "v*")
+		tagOutput, tagErr := tagCmd.Output()
+		cancel2()
+		
+		if tagErr == nil && len(tagOutput) > 0 {
+			// Parse all tags and find the latest valid semantic version
+			lines := strings.Split(strings.TrimSpace(string(tagOutput)), "\n")
+			for _, line := range lines {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				// Extract tag name from line like "refs/tags/v0.3.0" or "refs/tags/v0.3.0^{}"
+				parts := strings.Fields(line)
+				if len(parts) < 2 {
+					continue
+				}
+				tagRef := parts[1]
 				if strings.HasPrefix(tagRef, "refs/tags/") {
-					latestTag := strings.TrimPrefix(tagRef, "refs/tags/")
+					tag := strings.TrimPrefix(tagRef, "refs/tags/")
 					// Remove ^{} suffix if present (dereferenced tag pointer)
-					latestTag = strings.TrimSuffix(latestTag, "^{}")
-					// Validate it's a proper version tag
-					if strings.HasPrefix(latestTag, "v") && len(latestTag) > 1 {
-						installTarget = fmt.Sprintf("github.com/hugoev/zap/cmd/zap@%s", latestTag)
-						log.VerboseLog("found latest tag: %s", latestTag)
+					tag = strings.TrimSuffix(tag, "^{}")
+					// Skip if not a version tag
+					if !strings.HasPrefix(tag, "v") {
+						continue
+					}
+					// Try to parse as semantic version
+					if ver, err := parseVersion(tag); err == nil {
+						// Found a valid version, check if it's newer
+						if installTarget == "" || ver.Compare(latestVersion) > 0 {
+							latestTag = tag
+							latestVersion = ver
+							installTarget = fmt.Sprintf("github.com/hugoev/zap/cmd/zap@%s", tag)
+						}
 					}
 				}
 			}
+			
+			if installTarget != "" {
+				log.VerboseLog("found latest tag: %s (version %s)", latestTag, latestVersion)
+				break
+			}
 		}
+		
+		if attempt < maxRetries {
+			log.VerboseLog("tag fetch attempt %d failed, retrying...", attempt)
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+	}
+	
+	// Compare with current version
+	currentVer, parseErr := parseVersion(currentVersion)
+	if parseErr == nil && installTarget != "" {
+		if latestVersion.Compare(currentVer) <= 0 {
+			log.Log(log.OK, "already up to date (version %s)", currentVersion)
+			return
+		}
+		log.VerboseLog("update available: %s -> %s", currentVersion, latestVersion)
 	}
 
 	// Fallback to @main if we can't get tags
@@ -633,14 +747,41 @@ func handleUpdate() {
 	if installedZapPath != "" {
 		if newInfo, err := os.Stat(installedZapPath); err == nil {
 			if !originalModTime.IsZero() && newInfo.ModTime().After(originalModTime) {
-				// Binary was updated, verify by running it
-				verifyCmd := exec.Command(installedZapPath, "version")
+				// Binary was updated, verify by running it and checking version
+				verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				verifyCmd := exec.CommandContext(verifyCtx, installedZapPath, "version")
 				verifyOutput, verifyErr := verifyCmd.Output()
+				verifyCancel()
+				
 				if verifyErr == nil {
 					outputStr := strings.TrimSpace(string(verifyOutput))
-					log.Log(log.OK, "update complete!")
-					log.Log(log.INFO, "new version: %s", outputStr)
-
+					
+					// Extract and compare versions
+					newVerStr, extractErr := extractVersionFromOutput(outputStr)
+					if extractErr == nil {
+						newVer, parseErr := parseVersion(newVerStr)
+						if parseErr == nil {
+							currentVer, _ := parseVersion(currentVersion)
+							if newVer.Compare(currentVer) > 0 {
+								log.Log(log.OK, "update complete!")
+								log.Log(log.INFO, "upgraded from %s to %s", currentVersion, newVer)
+							} else if newVer.Compare(currentVer) == 0 {
+								log.Log(log.OK, "update complete!")
+								log.Log(log.INFO, "version: %s (same version, binary updated)", newVer)
+							} else {
+								log.Log(log.OK, "update complete!")
+								log.Log(log.INFO, "warning: new version %s appears older than current %s", newVer, currentVersion)
+								log.Log(log.INFO, "this may indicate a downgrade or version mismatch")
+							}
+						} else {
+							log.Log(log.OK, "update complete!")
+							log.Log(log.INFO, "new version: %s", outputStr)
+						}
+					} else {
+						log.Log(log.OK, "update complete!")
+						log.Log(log.INFO, "new version: %s", outputStr)
+					}
+					
 					// Check if PATH needs updating
 					if installedZapPath == expectedZapPath && originalZapPath != expectedZapPath {
 						log.Log(log.INFO, "updated binary installed to: %s", expectedZapPath)
@@ -648,12 +789,14 @@ func handleUpdate() {
 							log.Log(log.INFO, "add %s to your PATH to use the updated version", goBinPath)
 						}
 					}
-
+					
+					// Warn about shell cache
 					if strings.Contains(outputStr, currentVersion) {
 						log.Log(log.INFO, "note: version may be cached, restart your terminal or run: hash -r")
 					}
 				} else {
 					log.Log(log.OK, "update complete!")
+					log.Log(log.INFO, "could not verify new version (binary may be corrupted)")
 					log.Log(log.INFO, "run 'zap version' to verify the new version")
 				}
 			} else if !originalModTime.IsZero() {
