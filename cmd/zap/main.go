@@ -533,17 +533,48 @@ func handleUpdate() {
 		log.VerboseLog("latest module version: %s", latestModuleVersion)
 	}
 
-	// Install latest version from main branch
-	// Using @main instead of @latest to avoid issues with old tags
+	// Try to get the latest version tag from GitHub
+	// First try to get the latest tag
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	
+	tagCmd := exec.CommandContext(ctx2, "git", "ls-remote", "--tags", "--sort=-v:refname", "https://github.com/hugoev/zap.git", "v*")
+	tagOutput, tagErr := tagCmd.Output()
+	
+	var installTarget string
+	if tagErr == nil && len(tagOutput) > 0 {
+		// Parse the latest tag from output
+		lines := strings.Split(strings.TrimSpace(string(tagOutput)), "\n")
+		if len(lines) > 0 {
+			// Extract tag name from line like "refs/tags/v0.3.0"
+			parts := strings.Fields(lines[0])
+			if len(parts) > 0 {
+				tagRef := parts[len(parts)-1]
+				if strings.HasPrefix(tagRef, "refs/tags/") {
+					latestTag := strings.TrimPrefix(tagRef, "refs/tags/")
+					installTarget = fmt.Sprintf("github.com/hugoev/zap/cmd/zap@%s", latestTag)
+					log.VerboseLog("found latest tag: %s", latestTag)
+				}
+			}
+		}
+	}
+	
+	// Fallback to @main if we can't get tags
+	if installTarget == "" {
+		installTarget = "github.com/hugoev/zap/cmd/zap@main"
+		log.VerboseLog("using main branch as fallback")
+	}
+	
+	// Install latest version
 	log.Log(log.INFO, "downloading and installing latest version...")
-
+	
 	updateCtx, updateCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer updateCancel()
-
-	cmd = exec.CommandContext(updateCtx, "go", "install", "github.com/hugoev/zap/cmd/zap@main")
+	
+	cmd = exec.CommandContext(updateCtx, "go", "install", installTarget)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
+	
 	if err := cmd.Run(); err != nil {
 		if updateCtx.Err() == context.DeadlineExceeded {
 			log.Log(log.FAIL, "update timed out after 60 seconds")
@@ -551,27 +582,41 @@ func handleUpdate() {
 			log.Log(log.FAIL, "failed to update: %v", err)
 		}
 		log.Log(log.INFO, "you can manually update by running:")
-		log.Log(log.INFO, "  go install github.com/hugoev/zap/cmd/zap@main")
+		log.Log(log.INFO, "  go install github.com/hugoev/zap/cmd/zap@latest")
 		os.Exit(1)
 	}
-
-	// Check if the binary was actually updated by comparing modification times
+	
+	// Verify the update by checking the new binary's version
+	// Give filesystem a moment to sync
+	time.Sleep(200 * time.Millisecond)
+	
+	// Check if binary was updated by comparing modification times
 	if pathErr == nil && !originalModTime.IsZero() {
-		// Give filesystem a moment to sync
-		time.Sleep(100 * time.Millisecond)
-
 		if newInfo, err := os.Stat(zapPath); err == nil {
 			if newInfo.ModTime().After(originalModTime) {
-				log.Log(log.OK, "update complete!")
-				log.Log(log.INFO, "run 'zap version' to verify the new version")
+				// Binary was updated, verify by running it
+				verifyCmd := exec.Command(zapPath, "version")
+				verifyOutput, verifyErr := verifyCmd.Output()
+				if verifyErr == nil {
+					outputStr := strings.TrimSpace(string(verifyOutput))
+					log.Log(log.OK, "update complete!")
+					log.Log(log.INFO, "new version: %s", outputStr)
+					if strings.Contains(outputStr, currentVersion) {
+						log.Log(log.INFO, "note: version may be cached, restart your terminal or run: hash -r")
+					}
+				} else {
+					log.Log(log.OK, "update complete!")
+					log.Log(log.INFO, "run 'zap version' to verify the new version")
+				}
 			} else {
 				log.Log(log.OK, "already up to date (version %s)", currentVersion)
 			}
 			return
 		}
 	}
-
-	// If we can't check, assume update succeeded
+	
+	// If we can't verify, still report success but warn user
 	log.Log(log.OK, "update complete!")
 	log.Log(log.INFO, "run 'zap version' to verify the new version")
+	log.Log(log.INFO, "if version hasn't changed, try: hash -r  (or restart your terminal)")
 }
